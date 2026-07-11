@@ -1,4 +1,4 @@
-# Odoo Café POS — UI Design System
+# Kaapi POS — UI Design System
 
 **Version:** 1.0
 **Purpose:** This file is the single source of truth for visual design across the project. Any agent (human or AI) building or editing UI in this codebase must follow these rules. If a screen needs something not covered here, extend this document first, then build — don't invent ad hoc styles inline.
