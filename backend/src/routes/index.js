@@ -1,0 +1,46 @@
+const { Router } = require('express');
+const authRoutes = require('./auth.routes');
+const usersRoutes = require('./users.routes');
+const employeesRoutes = require('./employees.routes');
+const categoriesRoutes = require('./categories.routes');
+const productsRoutes = require('./products.routes');
+const paymentMethodsRoutes = require('./paymentMethods.routes');
+const floorsRoutes = require('./floors.routes');
+const tablesRoutes = require('./tables.routes');
+const couponsRoutes = require('./coupons.routes');
+const promotionsRoutes = require('./promotions.routes');
+const customersRoutes = require('./customers.routes');
+const sessionsRoutes = require('./sessions.routes');
+const ordersRoutes = require('./orders.routes');
+const orderLinesRoutes = require('./orderLines.routes');
+const paymentsRoutes = require('./payments.routes');
+const kdsRoutes = require('./kds.routes');
+const kdsPublicRoutes = require('./kdsPublic.routes');
+const selfOrderingRoutes = require('./selfOrdering.routes');
+const customerDisplayRoutes = require('./customerDisplay.routes');
+const reportsRoutes = require('./reports.routes');
+
+const router = Router();
+
+router.use('/auth', authRoutes);
+router.use('/users', usersRoutes);
+router.use('/employees', employeesRoutes);
+router.use('/categories', categoriesRoutes);
+router.use('/products', productsRoutes);
+router.use('/payment-methods', paymentMethodsRoutes);
+router.use('/floors', floorsRoutes);
+router.use('/tables', tablesRoutes);
+router.use('/coupons', couponsRoutes);
+router.use('/promotions', promotionsRoutes);
+router.use('/customers', customersRoutes);
+router.use('/sessions', sessionsRoutes);
+router.use('/orders', ordersRoutes);
+router.use('/orders', orderLinesRoutes);
+router.use('/orders', paymentsRoutes);
+router.use('/kds', kdsRoutes);
+router.use('/kds-public', kdsPublicRoutes);
+router.use('/self-ordering', selfOrderingRoutes);
+router.use('/customer-display', customerDisplayRoutes);
+router.use('/reports', reportsRoutes);
+
+module.exports = router;
