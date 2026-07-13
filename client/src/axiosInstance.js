@@ -7,7 +7,7 @@ const isLocalhost =
 
 const baseURL = isLocalhost 
   ? `http://${window.location.hostname}:5000` 
-  : 'https://v0xi3e2k88.execute-api.eu-north-1.amazonaws.com/default/kaapi-pos-api';
+  : 'https://njhzpt4jrh.execute-api.eu-north-1.amazonaws.com/prod';
 
 const axiosInstance = axios.create({
   baseURL,
