@@ -1,8 +1,16 @@
 import axios from 'axios';
 
-const API_HOST = window.location.hostname;
+const isLocalhost = 
+  window.location.hostname === 'localhost' || 
+  window.location.hostname === '127.0.0.1' || 
+  window.location.hostname.startsWith('192.168.');
+
+const baseURL = isLocalhost 
+  ? `http://${window.location.hostname}:5000` 
+  : 'https://v0xi3e2k88.execute-api.eu-north-1.amazonaws.com/default/kaapi-pos-api';
+
 const axiosInstance = axios.create({
-  baseURL: `http://${API_HOST}:5000`,
+  baseURL,
 });
 
 axiosInstance.interceptors.request.use((config) => {
@@ -22,7 +30,7 @@ axiosInstance.interceptors.response.use(
       const refreshToken = localStorage.getItem('refresh_token');
       if (refreshToken) {
         try {
-          const { data } = await axios.post(`http://${API_HOST}:5000/v1/auth/refresh`, { refresh_token: refreshToken });
+          const { data } = await axios.post(`${baseURL}/v1/auth/refresh`, { refresh_token: refreshToken });
           localStorage.setItem('access_token', data.data.access_token);
           originalRequest.headers.Authorization = `Bearer ${data.data.access_token}`;
           return axiosInstance(originalRequest);
