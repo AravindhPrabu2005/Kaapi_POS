@@ -5,21 +5,22 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError, ConflictError } = require('../utils/errors');
 const { db } = require('../db');
 const { sessions, users, orders, payments } = require('../db/schema');
-const { eq, and, desc, sql } = require('drizzle-orm');
 
 const router = Router();
 router.use(authenticate);
 
 router.get('/latest', async (req, res, next) => {
   try {
-    const [session] = await db.select().from(sessions).orderBy(desc(sessions.openedAt)).limit(1);
+    const cursor = await db.collection(sessions.tableName).find({});
+    const sessionArr = await cursor.sort({ openedAt: -1 }).limit(1).toArray();
+    const session = sessionArr[0] || null;
     if (!session) {
       return sendSuccess(res, null);
     }
 
     let openedByUser = null;
     if (session.openedBy) {
-      const [u] = await db.select().from(users).where(eq(users.id, session.openedBy)).limit(1);
+      const u = await db.collection(users.tableName).findOne({ id: session.openedBy });
       if (u) openedByUser = { id: u.id, name: u.name };
     }
 
@@ -33,15 +34,22 @@ router.get('/latest', async (req, res, next) => {
 
 router.post('/open', async (req, res, next) => {
   try {
-    const [active] = await db.select().from(sessions).where(eq(sessions.status, 'open')).limit(1);
+    const active = await db.collection(sessions.tableName).findOne({ status: 'open' });
     if (active) {
       return next(new ConflictError('SESSION_ALREADY_OPEN', 'A session is already open. Close it before opening a new one.'));
     }
 
-    const [session] = await db.insert(sessions).values({
+    const session = {
+      id: require('uuid').v4(),
       openedBy: req.user.id,
       status: 'open',
-    }).returning();
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      closingAmount: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(sessions.tableName).insertOne(session);
 
     sendSuccess(res, {
       id: session.id, status: 'open',
@@ -53,43 +61,53 @@ router.post('/open', async (req, res, next) => {
 
 router.get('/active', async (req, res, next) => {
   try {
-    const [session] = await db.select().from(sessions).where(eq(sessions.status, 'open')).limit(1);
+    const session = await db.collection(sessions.tableName).findOne({ status: 'open' });
     if (!session) return next(new NotFoundError('No active session.'));
 
-    const [{ count }] = await db.select({ count: sql`count(*)` }).from(orders).where(eq(orders.sessionId, session.id));
-    const [{ total }] = await db.select({ total: sql`COALESCE(SUM(CAST(total AS numeric)), 0)` }).from(orders).where(and(eq(orders.sessionId, session.id), eq(orders.status, 'paid')));
+    const count = await db.collection(orders.tableName).countDocuments({ sessionId: session.id });
+    const activeOrdersCursor = await db.collection(orders.tableName).find({ sessionId: session.id, status: 'paid' });
+    const activeOrders = await activeOrdersCursor.toArray();
+    const total = activeOrders.reduce((sum, o) => sum + parseFloat(o.total || 0), 0);
 
     sendSuccess(res, {
       id: session.id, status: 'open', opened_at: session.openedAt,
       opened_by: { id: req.user.id, name: req.user.name || 'Unknown' },
-      order_count: parseInt(count, 10), running_total: parseFloat(total).toFixed(2),
+      order_count: count, running_total: total.toFixed(2),
     });
   } catch (err) { next(err); }
 });
 
 router.post('/:session_id/close', async (req, res, next) => {
   try {
-    const [session] = await db.select().from(sessions).where(eq(sessions.id, req.params.session_id)).limit(1);
+    const session = await db.collection(sessions.tableName).findOne({ id: req.params.session_id });
     if (!session) return next(new NotFoundError('Session not found.'));
 
-    const sessionOrders = await db.select().from(orders).where(and(eq(orders.sessionId, session.id), eq(orders.status, 'paid')));
+    const ordersCursor = await db.collection(orders.tableName).find({ sessionId: session.id, status: 'paid' });
+    const sessionOrders = await ordersCursor.toArray();
 
     let totalRevenue = 0;
     const paymentBreakdown = {};
 
     for (const order of sessionOrders) {
       totalRevenue += parseFloat(order.total);
-      const orderPayments = await db.select().from(payments).where(eq(payments.orderId, order.id));
+      const paymentsCursor = await db.collection(payments.tableName).find({ orderId: order.id });
+      const orderPayments = await paymentsCursor.toArray();
       for (const pmt of orderPayments) {
         paymentBreakdown[pmt.method] = (paymentBreakdown[pmt.method] || 0) + parseFloat(pmt.amount);
       }
     }
 
-    const [updated] = await db.update(sessions).set({
+    const updates = {
       status: 'closed',
       closedAt: new Date().toISOString(),
       closingAmount: totalRevenue.toFixed(2),
-    }).where(eq(sessions.id, req.params.session_id)).returning();
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(sessions.tableName).updateOne(
+      { id: req.params.session_id },
+      { $set: updates }
+    );
+    const updated = await db.collection(sessions.tableName).findOne({ id: req.params.session_id });
 
     sendSuccess(res, {
       id: updated.id, status: 'closed',
@@ -108,21 +126,21 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { from, to } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (from) conditions.push(sql`${sessions.openedAt} >= ${from}::timestamp`);
-    if (to) conditions.push(sql`${sessions.openedAt} <= ${to}::timestamp`);
+    const filter = {};
+    if (from || to) {
+      filter.openedAt = {};
+      if (from) filter.openedAt.$gte = from;
+      if (to) filter.openedAt.$lte = to;
+    }
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(sessions).where(where).limit(pageSize).offset(offset).orderBy(desc(sessions.openedAt)),
-      db.select({ count: sql`count(*)` }).from(sessions).where(where),
-    ]);
+    const count = await db.collection(sessions.tableName).countDocuments(filter);
+    const cursor = await db.collection(sessions.tableName).find(filter);
+    const data = await cursor.sort({ openedAt: -1 }).skip(offset).limit(pageSize).toArray();
 
     const result = await Promise.all(data.map(async (s) => {
       let openedByUser = null;
       if (s.openedBy) {
-        const [u] = await db.select().from(users).where(eq(users.id, s.openedBy)).limit(1);
+        const u = await db.collection(users.tableName).findOne({ id: s.openedBy });
         if (u) openedByUser = { id: u.id, name: u.name };
       }
       return {
@@ -131,7 +149,7 @@ router.get('/', parsePagination, async (req, res, next) => {
       };
     }));
 
-    sendPaginated(res, result, { page, pageSize, totalCount: parseInt(count, 10) });
+    sendPaginated(res, result, { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 

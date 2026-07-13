@@ -8,7 +8,6 @@ const { NotFoundError, ConflictError, ValidationError } = require('../utils/erro
 const bcrypt = require('bcryptjs');
 const { db } = require('../db');
 const { users } = require('../db/schema');
-const { eq, and, or, like, sql } = require('drizzle-orm');
 const config = require('../config/env');
 
 const router = Router();
@@ -36,17 +35,23 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { role, status, search } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (role) conditions.push(eq(users.role, role));
-    if (status) conditions.push(eq(users.status, status));
-    if (search) conditions.push(or(like(users.name, `%${search}%`), like(users.email, `%${search}%`)));
+    const filter = {};
+    if (role) {
+      filter.role = role;
+    }
+    if (status) {
+      filter.status = status;
+    }
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(users).where(where).limit(pageSize).offset(offset).orderBy(users.createdAt),
-      db.select({ count: sql`count(*)` }).from(users).where(where),
-    ]);
+    const count = await db.collection(users.tableName).countDocuments(filter);
+    const cursor = await db.collection(users.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: 1 }).skip(offset).limit(pageSize).toArray();
 
     sendPaginated(res, data.map((u) => ({
       id: u.id,
@@ -55,13 +60,13 @@ router.get('/', parsePagination, async (req, res, next) => {
       role: u.role,
       status: u.status,
       created_at: u.createdAt,
-    })), { page, pageSize, totalCount: parseInt(count, 10) });
+    })), { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 
 router.get('/:employee_id', async (req, res, next) => {
   try {
-    const [user] = await db.select().from(users).where(eq(users.id, req.params.employee_id)).limit(1);
+    const user = await db.collection(users.tableName).findOne({ id: req.params.employee_id });
     if (!user) return next(new NotFoundError('Employee not found.'));
     sendSuccess(res, {
       id: user.id,
@@ -79,13 +84,23 @@ router.post('/', validate(createEmployeeSchema), async (req, res, next) => {
   try {
     const { name, email, password, role } = req.body;
 
-    const existing = await db.select().from(users).where(eq(users.email, email)).limit(1);
-    if (existing.length > 0) {
+    const existing = await db.collection(users.tableName).findOne({ email });
+    if (existing) {
       return next(new ConflictError('VALIDATION_ERROR', 'Email is already in use.'));
     }
 
     const passwordHash = await bcrypt.hash(password, config.bcryptRounds);
-    const [user] = await db.insert(users).values({ name, email, passwordHash, role }).returning();
+    const user = {
+      id: require('uuid').v4(),
+      name,
+      email,
+      passwordHash,
+      role,
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(users.tableName).insertOne(user);
 
     sendSuccess(res, {
       id: user.id,
@@ -104,8 +119,15 @@ router.put('/:employee_id', validate(updateEmployeeSchema), async (req, res, nex
     if (req.body.name) updates.name = req.body.name;
     if (req.body.role) updates.role = req.body.role;
 
-    const [user] = await db.update(users).set(updates).where(eq(users.id, req.params.employee_id)).returning();
-    if (!user) return next(new NotFoundError('Employee not found.'));
+    const resUpdate = await db.collection(users.tableName).updateOne(
+      { id: req.params.employee_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Employee not found.'));
+    }
+
+    const user = await db.collection(users.tableName).findOne({ id: req.params.employee_id });
 
     sendSuccess(res, {
       id: user.id,
@@ -121,32 +143,48 @@ router.put('/:employee_id', validate(updateEmployeeSchema), async (req, res, nex
 router.post('/:employee_id/change-password', validate(changePasswordSchema), async (req, res, next) => {
   try {
     const passwordHash = await bcrypt.hash(req.body.new_password, config.bcryptRounds);
-    const [user] = await db.update(users).set({ passwordHash, updatedAt: new Date().toISOString() }).where(eq(users.id, req.params.employee_id)).returning();
-    if (!user) return next(new NotFoundError('Employee not found.'));
+    const resUpdate = await db.collection(users.tableName).updateOne(
+      { id: req.params.employee_id },
+      { $set: { passwordHash, updatedAt: new Date().toISOString() } }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Employee not found.'));
+    }
     sendSuccess(res, { message: 'Password updated successfully.' });
   } catch (err) { next(err); }
 });
 
 router.post('/:employee_id/archive', async (req, res, next) => {
   try {
-    const [user] = await db.update(users).set({ status: 'archived', archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).where(eq(users.id, req.params.employee_id)).returning();
-    if (!user) return next(new NotFoundError('Employee not found.'));
+    const updates = {
+      status: 'archived',
+      archivedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const resUpdate = await db.collection(users.tableName).updateOne(
+      { id: req.params.employee_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Employee not found.'));
+    }
+    const user = await db.collection(users.tableName).findOne({ id: req.params.employee_id });
     sendSuccess(res, { id: user.id, status: user.status, archived_at: user.archivedAt });
   } catch (err) { next(err); }
 });
 
 router.delete('/:employee_id', async (req, res, next) => {
   try {
-    const [user] = await db.select().from(users).where(eq(users.id, req.params.employee_id)).limit(1);
+    const user = await db.collection(users.tableName).findOne({ id: req.params.employee_id });
     if (!user) return next(new NotFoundError('Employee not found.'));
 
     const { orders } = require('../db/schema');
-    const orderCount = await db.select({ count: sql`count(*)` }).from(orders).where(eq(orders.employeeId, req.params.employee_id));
-    if (parseInt(orderCount[0].count, 10) > 0) {
+    const count = await db.collection(orders.tableName).countDocuments({ employeeId: req.params.employee_id });
+    if (count > 0) {
       return next(new ConflictError('RESOURCE_IN_USE', 'Employee has associated orders and cannot be permanently deleted. Archive instead.'));
     }
 
-    await db.delete(users).where(eq(users.id, req.params.employee_id));
+    await db.collection(users.tableName).deleteOne({ id: req.params.employee_id });
     res.status(204).send();
   } catch (err) { next(err); }
 });

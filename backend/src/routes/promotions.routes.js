@@ -7,7 +7,6 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError, ValidationError } = require('../utils/errors');
 const { db } = require('../db');
 const { promotions, products, orders, orderLines, promotionUsages } = require('../db/schema');
-const { eq, and, like, sql, lte, gte, isNull, or, ne } = require('drizzle-orm');
 
 const router = Router();
 router.use(authenticate);
@@ -40,17 +39,14 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { scope, active, search } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (scope) conditions.push(eq(promotions.scope, scope));
-    if (active !== undefined) conditions.push(eq(promotions.active, active === 'true'));
-    if (search) conditions.push(like(promotions.name, `%${search}%`));
+    const filter = {};
+    if (scope) filter.scope = scope;
+    if (active !== undefined) filter.active = active === 'true';
+    if (search) filter.name = { $regex: search, $options: 'i' };
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(promotions).where(where).limit(pageSize).offset(offset).orderBy(promotions.createdAt),
-      db.select({ count: sql`count(*)` }).from(promotions).where(where),
-    ]);
+    const count = await db.collection(promotions.tableName).countDocuments(filter);
+    const cursor = await db.collection(promotions.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: 1 }).skip(offset).limit(pageSize).toArray();
 
     const result = data.map((p) => ({
       id: p.id, name: p.name, scope: p.scope,
@@ -61,18 +57,18 @@ router.get('/', parsePagination, async (req, res, next) => {
       valid_from: p.validFrom, valid_until: p.validUntil,
     }));
 
-    sendPaginated(res, result, { page, pageSize, totalCount: parseInt(count, 10) });
+    sendPaginated(res, result, { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 
 router.get('/:promotion_id', async (req, res, next) => {
   try {
-    const [p] = await db.select().from(promotions).where(eq(promotions.id, req.params.promotion_id)).limit(1);
+    const p = await db.collection(promotions.tableName).findOne({ id: req.params.promotion_id });
     if (!p) return next(new NotFoundError('Promotion not found.'));
 
     let productData = null;
     if (p.productId) {
-      const [prod] = await db.select().from(products).where(eq(products.id, p.productId)).limit(1);
+      const prod = await db.collection(products.tableName).findOne({ id: p.productId });
       if (prod) productData = { id: prod.id, name: prod.name };
     }
 
@@ -89,15 +85,24 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
   try {
     if (req.body.scope === 'product') {
       const parsed = createProductScopeSchema.parse(req.body);
-      const [promo] = await db.insert(promotions).values({
-        name: parsed.name, scope: 'product', productId: parsed.product_id,
-        minQuantity: parsed.min_quantity, discountType: parsed.discount_type,
-        discountValue: parsed.discount_value, active: parsed.active !== undefined ? parsed.active : true,
-        validFrom: parsed.valid_from || null, validUntil: parsed.valid_until || null,
-      }).returning();
+      const promo = {
+        id: require('uuid').v4(),
+        name: parsed.name,
+        scope: 'product',
+        productId: parsed.product_id,
+        minQuantity: parsed.min_quantity,
+        discountType: parsed.discount_type,
+        discountValue: parsed.discount_value,
+        active: parsed.active !== undefined ? parsed.active : true,
+        validFrom: parsed.valid_from || null,
+        validUntil: parsed.valid_until || null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await db.collection(promotions.tableName).insertOne(promo);
 
       let productData = null;
-      const [prod] = await db.select().from(products).where(eq(products.id, promo.productId)).limit(1);
+      const prod = await db.collection(products.tableName).findOne({ id: promo.productId });
       if (prod) productData = { id: prod.id, name: prod.name };
 
       return sendSuccess(res, {
@@ -110,12 +115,20 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
 
     if (req.body.scope === 'order') {
       const parsed = createOrderScopeSchema.parse(req.body);
-      const [promo] = await db.insert(promotions).values({
-        name: parsed.name, scope: 'order', minOrderAmount: parsed.min_order_amount,
-        discountType: parsed.discount_type, discountValue: parsed.discount_value,
+      const promo = {
+        id: require('uuid').v4(),
+        name: parsed.name,
+        scope: 'order',
+        minOrderAmount: parsed.min_order_amount,
+        discountType: parsed.discount_type,
+        discountValue: parsed.discount_value,
         active: parsed.active !== undefined ? parsed.active : true,
-        validFrom: parsed.valid_from || null, validUntil: parsed.valid_until || null,
-      }).returning();
+        validFrom: parsed.valid_from || null,
+        validUntil: parsed.valid_until || null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await db.collection(promotions.tableName).insertOne(promo);
 
       return sendSuccess(res, {
         id: promo.id, name: promo.name, scope: 'order', min_order_amount: promo.minOrderAmount,
@@ -131,7 +144,7 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
 
 router.put('/:promotion_id', requireRole('admin'), async (req, res, next) => {
   try {
-    const [existing] = await db.select().from(promotions).where(eq(promotions.id, req.params.promotion_id)).limit(1);
+    const existing = await db.collection(promotions.tableName).findOne({ id: req.params.promotion_id });
     if (!existing) return next(new NotFoundError('Promotion not found.'));
 
     const updates = { updatedAt: new Date().toISOString() };
@@ -154,12 +167,19 @@ router.put('/:promotion_id', requireRole('admin'), async (req, res, next) => {
       updates.minQuantity = null;
     }
 
-    const [p] = await db.update(promotions).set(updates).where(eq(promotions.id, req.params.promotion_id)).returning();
-    if (!p) return next(new NotFoundError('Promotion not found.'));
+    const resUpdate = await db.collection(promotions.tableName).updateOne(
+      { id: req.params.promotion_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Promotion not found.'));
+    }
+
+    const p = await db.collection(promotions.tableName).findOne({ id: req.params.promotion_id });
 
     let productData = null;
     if (p.productId) {
-      const [prod] = await db.select().from(products).where(eq(products.id, p.productId)).limit(1);
+      const prod = await db.collection(products.tableName).findOne({ id: p.productId });
       if (prod) productData = { id: prod.id, name: prod.name };
     }
 
@@ -175,11 +195,14 @@ router.put('/:promotion_id', requireRole('admin'), async (req, res, next) => {
 
 router.delete('/:promotion_id', requireRole('admin'), async (req, res, next) => {
   try {
-    const [p] = await db.select().from(promotions).where(eq(promotions.id, req.params.promotion_id)).limit(1);
+    const p = await db.collection(promotions.tableName).findOne({ id: req.params.promotion_id });
     if (!p) return next(new NotFoundError('Promotion not found.'));
-    await db.delete(promotionUsages).where(eq(promotionUsages.promotionId, req.params.promotion_id));
-    await db.update(orderLines).set({ appliedPromotionId: null }).where(eq(orderLines.appliedPromotionId, req.params.promotion_id));
-    await db.delete(promotions).where(eq(promotions.id, req.params.promotion_id));
+    await db.collection(promotionUsages.tableName).deleteMany({ promotionId: req.params.promotion_id });
+    await db.collection(orderLines.tableName).updateMany(
+      { appliedPromotionId: req.params.promotion_id },
+      { $set: { appliedPromotionId: null } }
+    );
+    await db.collection(promotions.tableName).deleteOne({ id: req.params.promotion_id });
     res.status(204).send();
   } catch (err) { next(err); }
 });
@@ -189,25 +212,32 @@ router.post('/evaluate', async (req, res, next) => {
     const { order_id } = req.body;
     if (!order_id) return next(new ValidationError([{ field: 'order_id', message: 'order_id is required.' }]));
 
-    const [order] = await db.select().from(orders).where(eq(orders.id, order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const lines = await db.select().from(orderLines).where(eq(orderLines.orderId, order_id));
+    const linesCursor = await db.collection(orderLines.tableName).find({ orderId: order_id });
+    const lines = await linesCursor.toArray();
     const now = new Date().toISOString();
 
     // Check which promos this customer already used on other orders
     const existingPromoUsages = new Set();
     if (order.customerId) {
-      const usages = await db.select().from(promotionUsages)
-        .where(and(eq(promotionUsages.customerId, order.customerId), ne(promotionUsages.orderId, order.id)));
+      const usagesCursor = await db.collection(promotionUsages.tableName).find({
+        customerId: order.customerId,
+        orderId: { $ne: order.id }
+      });
+      const usages = await usagesCursor.toArray();
       usages.forEach((u) => existingPromoUsages.add(u.promotionId));
     }
 
-    const activePromos = await db.select().from(promotions).where(
-      and(eq(promotions.active, true),
-        or(isNull(promotions.validFrom), lte(promotions.validFrom, now)),
-        or(isNull(promotions.validUntil), gte(promotions.validUntil, now)))
-    );
+    const activePromosCursor = await db.collection(promotions.tableName).find({
+      active: true,
+      $and: [
+        { $or: [{ validFrom: null }, { validFrom: { $lte: now } }] },
+        { $or: [{ validUntil: null }, { validUntil: { $gte: now } }] }
+      ]
+    });
+    const activePromos = await activePromosCursor.toArray();
 
     let totalDiscount = 0;
     const applied = [];

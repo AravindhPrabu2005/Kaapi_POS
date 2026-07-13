@@ -6,7 +6,7 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError } = require('../utils/errors');
 const { db } = require('../db');
 const { orders, orderLines, products, promotions, promotionUsages } = require('../db/schema');
-const { eq, and, lte, gte, isNull, or, ne } = require('drizzle-orm');
+const { v4: uuidv4 } = require('uuid');
 
 const router = Router();
 router.use(authenticate);
@@ -21,10 +21,10 @@ const updateLineSchema = z.object({
 });
 
 async function recalcOrderTotals(orderId) {
-  const lines = await db.select().from(orderLines).where(eq(orderLines.orderId, orderId));
+  const lines = await (await db.collection(orderLines.tableName).find({ orderId })).toArray();
   const ordersTable = require('../db/schema').orders;
   const couponsTable = require('../db/schema').coupons;
-  const [order] = await db.select().from(ordersTable).where(eq(ordersTable.id, orderId)).limit(1);
+  const order = await db.collection(ordersTable.tableName).findOne({ id: orderId });
   if (!order) return;
 
   let subtotal = 0;
@@ -38,7 +38,7 @@ async function recalcOrderTotals(orderId) {
 
   let couponDiscount = 0;
   if (order.couponId) {
-    const [cp] = await db.select().from(couponsTable).where(eq(couponsTable.id, order.couponId)).limit(1);
+    const cp = await db.collection(couponsTable.tableName).findOne({ id: order.couponId });
     if (cp) {
       if (cp.discountType === 'percentage') {
         couponDiscount = subtotal * parseFloat(cp.discountValue) / 100;
@@ -54,21 +54,26 @@ async function recalcOrderTotals(orderId) {
   const tax = subtotal * taxRate;
   const total = subtotal + tax - totalDiscount;
 
-  await db.update(ordersTable).set({
-    subtotal: subtotal.toFixed(2),
-    tax: tax.toFixed(2),
-    discount: totalDiscount.toFixed(2),
-    total: Math.max(0, total).toFixed(2),
-    updatedAt: new Date().toISOString(),
-  }).where(eq(ordersTable.id, orderId));
+  await db.collection(ordersTable.tableName).updateOne(
+    { id: orderId },
+    {
+      $set: {
+        subtotal: subtotal.toFixed(2),
+        tax: tax.toFixed(2),
+        discount: totalDiscount.toFixed(2),
+        total: Math.max(0, total).toFixed(2),
+        updatedAt: new Date().toISOString(),
+      }
+    }
+  );
 }
 
 router.post('/:order_id/lines', validate(addLineSchema), async (req, res, next) => {
   try {
-    const [order] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const [product] = await db.select().from(products).where(eq(products.id, req.body.product_id)).limit(1);
+    const product = await db.collection(products.tableName).findOne({ id: req.body.product_id });
     if (!product) return next(new NotFoundError('Product not found.'));
 
     const quantity = req.body.quantity;
@@ -80,16 +85,21 @@ router.post('/:order_id/lines', validate(addLineSchema), async (req, res, next) 
     // Check which promos this customer already used on other orders
     const existingPromoUsages = new Set();
     if (order.customerId) {
-      const usages = await db.select().from(promotionUsages)
-        .where(and(eq(promotionUsages.customerId, order.customerId), ne(promotionUsages.orderId, order.id)));
+      const usages = await (await db.collection(promotionUsages.tableName).find({
+        customerId: order.customerId,
+        orderId: { $ne: order.id }
+      })).toArray();
       usages.forEach((u) => existingPromoUsages.add(u.promotionId));
     }
 
-    const activePromos = await db.select().from(promotions).where(
-      and(eq(promotions.active, true),
-        or(isNull(promotions.validFrom), lte(promotions.validFrom, now)),
-        or(isNull(promotions.validUntil), gte(promotions.validUntil, now)))
-    );
+    const activePromos = await (await db.collection(promotions.tableName).find({
+      active: true,
+      $and: [
+        { $or: [ { validFrom: null }, { validFrom: { $exists: false } }, { validFrom: { $lte: now } } ] },
+        { $or: [ { validUntil: null }, { validUntil: { $exists: false } }, { validUntil: { $gte: now } } ] }
+      ]
+    })).toArray();
+
     let lineDiscount = 0;
     let appliedPromotionId = null;
     for (const promo of activePromos) {
@@ -105,7 +115,9 @@ router.post('/:order_id/lines', validate(addLineSchema), async (req, res, next) 
 
     const finalLineTotal = (unitPrice * quantity - lineDiscount).toFixed(2);
 
-    const [line] = await db.insert(orderLines).values({
+    const lineId = uuidv4();
+    const lineDoc = {
+      id: lineId,
       orderId: req.params.order_id,
       productId: req.body.product_id,
       quantity,
@@ -113,24 +125,32 @@ router.post('/:order_id/lines', validate(addLineSchema), async (req, res, next) 
       lineDiscount: lineDiscount.toFixed(2),
       appliedPromotionId,
       lineTotal: finalLineTotal,
-    }).returning();
+      createdAt: now,
+      updatedAt: now,
+    };
+    await db.collection(orderLines.tableName).insertOne(lineDoc);
 
     // Record promotion usage
     if (order.customerId && appliedPromotionId) {
-      await db.insert(promotionUsages).values({
-        promotionId: appliedPromotionId, orderId: order.id, customerId: order.customerId,
+      await db.collection(promotionUsages.tableName).insertOne({
+        id: uuidv4(),
+        promotionId: appliedPromotionId,
+        orderId: order.id,
+        customerId: order.customerId,
+        createdAt: now,
+        updatedAt: now,
       });
     }
 
     await recalcOrderTotals(req.params.order_id);
 
-    const [updatedOrder] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const updatedOrder = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
 
     sendSuccess(res, {
-      id: line.id,
+      id: lineDoc.id,
       product: { id: product.id, name: product.name },
-      quantity: line.quantity, unit_price: line.unitPrice,
-      line_discount: line.lineDiscount, line_total: line.lineTotal,
+      quantity: lineDoc.quantity, unit_price: lineDoc.unitPrice,
+      line_discount: lineDoc.lineDiscount, line_total: lineDoc.lineTotal,
       order_totals: {
         subtotal: updatedOrder.subtotal, tax: updatedOrder.tax,
         discount: updatedOrder.discount, total: updatedOrder.total,
@@ -141,13 +161,13 @@ router.post('/:order_id/lines', validate(addLineSchema), async (req, res, next) 
 
 router.patch('/:order_id/lines/:line_id', validate(updateLineSchema), async (req, res, next) => {
   try {
-    const [order] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const [line] = await db.select().from(orderLines).where(and(
-      eq(orderLines.id, req.params.line_id),
-      eq(orderLines.orderId, req.params.order_id),
-    )).limit(1);
+    const line = await db.collection(orderLines.tableName).findOne({
+      id: req.params.line_id,
+      orderId: req.params.order_id,
+    });
     if (!line) return next(new NotFoundError('Order line not found.'));
 
     const quantity = req.body.quantity;
@@ -157,16 +177,21 @@ router.patch('/:order_id/lines/:line_id', validate(updateLineSchema), async (req
     // Check this customer's existing promo usages on other orders
     const existingPromoUsages = new Set();
     if (order.customerId) {
-      const usages = await db.select().from(promotionUsages)
-        .where(and(eq(promotionUsages.customerId, order.customerId), ne(promotionUsages.orderId, order.id)));
+      const usages = await (await db.collection(promotionUsages.tableName).find({
+        customerId: order.customerId,
+        orderId: { $ne: order.id }
+      })).toArray();
       usages.forEach((u) => existingPromoUsages.add(u.promotionId));
     }
 
-    const activePromos = await db.select().from(promotions).where(
-      and(eq(promotions.active, true),
-        or(isNull(promotions.validFrom), lte(promotions.validFrom, now)),
-        or(isNull(promotions.validUntil), gte(promotions.validUntil, now)))
-    );
+    const activePromos = await (await db.collection(promotions.tableName).find({
+      active: true,
+      $and: [
+        { $or: [ { validFrom: null }, { validFrom: { $exists: false } }, { validFrom: { $lte: now } } ] },
+        { $or: [ { validUntil: null }, { validUntil: { $exists: false } }, { validUntil: { $gte: now } } ] }
+      ]
+    })).toArray();
+
     let lineDiscount = 0;
     let appliedPromotionId = null;
 
@@ -185,36 +210,48 @@ router.patch('/:order_id/lines/:line_id', validate(updateLineSchema), async (req
 
     // Clean up old promotion usage for this line, then record new one
     if (order.customerId && line.appliedPromotionId) {
-      await db.delete(promotionUsages).where(
-        and(eq(promotionUsages.promotionId, line.appliedPromotionId),
-          eq(promotionUsages.orderId, order.id),
-          eq(promotionUsages.customerId, order.customerId))
-      );
+      await db.collection(promotionUsages.tableName).deleteMany({
+        promotionId: line.appliedPromotionId,
+        orderId: order.id,
+        customerId: order.customerId,
+      });
     }
     if (order.customerId && appliedPromotionId) {
-      await db.insert(promotionUsages).values({
-        promotionId: appliedPromotionId, orderId: order.id, customerId: order.customerId,
+      await db.collection(promotionUsages.tableName).insertOne({
+        id: uuidv4(),
+        promotionId: appliedPromotionId,
+        orderId: order.id,
+        customerId: order.customerId,
+        createdAt: now,
+        updatedAt: now,
       });
     }
 
-    const [updatedLine] = await db.update(orderLines).set({
-      quantity,
-      lineDiscount: lineDiscount.toFixed(2),
-      appliedPromotionId,
-      lineTotal,
-    }).where(eq(orderLines.id, req.params.line_id)).returning();
+    await db.collection(orderLines.tableName).updateOne(
+      { id: req.params.line_id },
+      {
+        $set: {
+          quantity,
+          lineDiscount: lineDiscount.toFixed(2),
+          appliedPromotionId,
+          lineTotal,
+          updatedAt: now,
+        }
+      }
+    );
+    const updatedLine = await db.collection(orderLines.tableName).findOne({ id: req.params.line_id });
 
     await recalcOrderTotals(req.params.order_id);
 
-    const [updatedOrder] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const updatedOrder = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
 
     let productData = null;
-    const [p] = await db.select().from(products).where(eq(products.id, updatedLine.productId)).limit(1);
+    const p = await db.collection(products.tableName).findOne({ id: updatedLine.productId });
     if (p) productData = { id: p.id, name: p.name };
 
     let promoData = null;
     if (updatedLine.appliedPromotionId) {
-      const [pr] = await db.select().from(promotions).where(eq(promotions.id, updatedLine.appliedPromotionId)).limit(1);
+      const pr = await db.collection(promotions.tableName).findOne({ id: updatedLine.appliedPromotionId });
       if (pr) promoData = { id: pr.id, name: pr.name };
     }
 
@@ -233,23 +270,23 @@ router.patch('/:order_id/lines/:line_id', validate(updateLineSchema), async (req
 
 router.delete('/:order_id/lines/:line_id', async (req, res, next) => {
   try {
-    const [line] = await db.select().from(orderLines).where(and(
-      eq(orderLines.id, req.params.line_id),
-      eq(orderLines.orderId, req.params.order_id),
-    )).limit(1);
+    const line = await db.collection(orderLines.tableName).findOne({
+      id: req.params.line_id,
+      orderId: req.params.order_id,
+    });
     if (!line) return next(new NotFoundError('Order line not found.'));
 
     if (line.appliedPromotionId) {
-      await db.delete(promotionUsages).where(
-        and(eq(promotionUsages.orderId, req.params.order_id),
-          eq(promotionUsages.promotionId, line.appliedPromotionId))
-      );
+      await db.collection(promotionUsages.tableName).deleteMany({
+        orderId: req.params.order_id,
+        promotionId: line.appliedPromotionId,
+      });
     }
 
-    await db.delete(orderLines).where(eq(orderLines.id, req.params.line_id));
+    await db.collection(orderLines.tableName).deleteOne({ id: req.params.line_id });
     await recalcOrderTotals(req.params.order_id);
 
-    const [updatedOrder] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const updatedOrder = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
 
     sendSuccess(res, {
       order_totals: {

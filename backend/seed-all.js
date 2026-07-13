@@ -1,7 +1,7 @@
 const { db, pool } = require('./db');
 const bcrypt = require('bcryptjs');
 const config = require('./src/config/env');
-const { eq, sql } = require('drizzle-orm');
+const { v4: uuidv4 } = require('uuid');
 const {
   users, categories, products, paymentMethods, floors, tables,
   coupons, promotions, customers, sessions, orders, orderLines,
@@ -48,26 +48,34 @@ async function seedAll() {
   // ─── 1. Users ──────────────────────────────────────────────────
   console.log('[1/17] Users');
   let adminUser, cashierUser;
-  const [existingAdmin] = await db.select().from(users).where(eq(users.role, 'admin')).limit(1);
+  const existingAdmin = await db.collection(users.tableName).findOne({ role: 'admin' });
   if (existingAdmin) {
     adminUser = existingAdmin;
     console.log('  ~ Admin exists, reusing');
   } else {
     const hash = await bcrypt.hash('admin123', config.bcryptRounds);
-    [adminUser] = await db.insert(users).values({
+    const nowStr = new Date().toISOString();
+    adminUser = {
+      id: uuidv4(),
       name: 'Admin', email: 'admin@odoocafe.com', passwordHash: hash, role: 'admin',
-    }).returning();
+      createdAt: nowStr, updatedAt: nowStr,
+    };
+    await db.collection(users.tableName).insertOne(adminUser);
     console.log('  ✓ Admin created (admin@odoocafe.com / admin123)');
   }
-  const [existingCashier] = await db.select().from(users).where(eq(users.role, 'cashier')).limit(1);
+  const existingCashier = await db.collection(users.tableName).findOne({ role: 'cashier' });
   if (existingCashier) {
     cashierUser = existingCashier;
     console.log('  ~ Cashier exists, reusing');
   } else {
     const hash = await bcrypt.hash('cashier123', config.bcryptRounds);
-    [cashierUser] = await db.insert(users).values({
+    const nowStr = new Date().toISOString();
+    cashierUser = {
+      id: uuidv4(),
       name: 'Cashier User', email: 'cashier@odoocafe.com', passwordHash: hash, role: 'cashier',
-    }).returning();
+      createdAt: nowStr, updatedAt: nowStr,
+    };
+    await db.collection(users.tableName).insertOne(cashierUser);
     console.log('  ✓ Cashier created (cashier@odoocafe.com / cashier123)');
   }
 
@@ -84,11 +92,17 @@ async function seedAll() {
   ];
   const catMap = {};
   for (const c of catData) {
-    const [existing] = await db.select().from(categories).where(eq(categories.name, c.name)).limit(1);
+    const existing = await db.collection(categories.tableName).findOne({ name: c.name });
     if (existing) {
       catMap[c.name] = existing;
     } else {
-      const [ins] = await db.insert(categories).values(c).returning();
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
+        ...c,
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(categories.tableName).insertOne(ins);
       catMap[c.name] = ins;
     }
   }
@@ -170,15 +184,19 @@ async function seedAll() {
   ].map((p) => ({ ...p, image_url: img(p.name) }));
   const allProducts = [];
   for (const p of prodData) {
-    const [existing] = await db.select().from(products).where(eq(products.name, p.name)).limit(1);
+    const existing = await db.collection(products.tableName).findOne({ name: p.name });
     if (existing) {
       allProducts.push(existing);
     } else {
-      const [ins] = await db.insert(products).values({
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
         name: p.name, categoryId: catMap[p.cat].id, price: p.price,
         unitOfMeasure: 'per_piece', taxPercent: '0.00', kdsEnabled: p.kds,
         imageUrl: p.image_url || null,
-      }).returning();
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(products.tableName).insertOne(ins);
       allProducts.push(ins);
     }
   }
@@ -193,11 +211,17 @@ async function seedAll() {
   ];
   const pmMap = {};
   for (const pm of pmData) {
-    const [existing] = await db.select().from(paymentMethods).where(eq(paymentMethods.type, pm.type)).limit(1);
+    const existing = await db.collection(paymentMethods.tableName).findOne({ type: pm.type });
     if (existing) {
       pmMap[pm.type] = existing;
     } else {
-      const [ins] = await db.insert(paymentMethods).values(pm).returning();
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
+        ...pm,
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(paymentMethods.tableName).insertOne(ins);
       pmMap[pm.type] = ins;
     }
   }
@@ -212,11 +236,17 @@ async function seedAll() {
   ];
   const floorMap = {};
   for (const f of floorData) {
-    const [existing] = await db.select().from(floors).where(eq(floors.name, f.name)).limit(1);
+    const existing = await db.collection(floors.tableName).findOne({ name: f.name });
     if (existing) {
       floorMap[f.name] = existing;
     } else {
-      const [ins] = await db.insert(floors).values(f).returning();
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
+        ...f,
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(floors.tableName).insertOne(ins);
       floorMap[f.name] = ins;
     }
   }
@@ -240,14 +270,18 @@ async function seedAll() {
   ];
   const allTables = [];
   for (const t of tableDefs) {
-    const [existing] = await db.select().from(tables).where(eq(tables.tableNumber, t.number)).limit(1);
+    const existing = await db.collection(tables.tableName).findOne({ tableNumber: t.number });
     if (existing) {
       allTables.push(existing);
     } else {
-      const [ins] = await db.insert(tables).values({
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
         floorId: floorMap[t.floor].id, tableNumber: t.number, seats: t.seats,
         qrToken: `table-${t.number}-${Math.random().toString(36).slice(2, 8)}`,
-      }).returning();
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(tables.tableName).insertOne(ins);
       allTables.push(ins);
     }
   }
@@ -264,11 +298,17 @@ async function seedAll() {
   ];
   const allCoupons = [];
   for (const c of couponData) {
-    const [existing] = await db.select().from(coupons).where(eq(coupons.code, c.code)).limit(1);
+    const existing = await db.collection(coupons.tableName).findOne({ code: c.code });
     if (existing) {
       allCoupons.push(existing);
     } else {
-      const [ins] = await db.insert(coupons).values(c).returning();
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
+        ...c,
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(coupons.tableName).insertOne(ins);
       allCoupons.push(ins);
     }
   }
@@ -286,11 +326,17 @@ async function seedAll() {
   ];
   const allCustomers = [];
   for (const c of custData) {
-    const [existing] = await db.select().from(customers).where(eq(customers.email, c.email)).limit(1);
+    const existing = await db.collection(customers.tableName).findOne({ email: c.email });
     if (existing) {
       allCustomers.push(existing);
     } else {
-      const [ins] = await db.insert(customers).values(c).returning();
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
+        ...c,
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(customers.tableName).insertOne(ins);
       allCustomers.push(ins);
     }
   }
@@ -298,10 +344,13 @@ async function seedAll() {
 
   // ─── 9. Self-Ordering Settings ────────────────────────────────
   console.log('\n[9/17] Self-Ordering Settings');
-  const [existingSettings] = await db.select().from(selfOrderingSettings).limit(1);
+  const existingSettings = await db.collection(selfOrderingSettings.tableName).findOne({});
   if (!existingSettings) {
-    await db.insert(selfOrderingSettings).values({
+    const nowStr = new Date().toISOString();
+    await db.collection(selfOrderingSettings.tableName).insertOne({
+      id: uuidv4(),
       enabled: true, mode: 'online_ordering', backgroundColor: '#FBF3E7',
+      createdAt: nowStr, updatedAt: nowStr,
     });
     console.log('  ✓ Created');
   } else {
@@ -319,18 +368,22 @@ async function seedAll() {
   ];
   const allPromotions = [];
   for (const p of promoData) {
-    const [existing] = await db.select().from(promotions).where(eq(promotions.name, p.name)).limit(1);
+    const existing = await db.collection(promotions.tableName).findOne({ name: p.name });
     if (existing) {
       allPromotions.push(existing);
     } else {
       const productId = p.productIdx !== null ? allProducts[pick(p.productIdx, rand)].id : null;
-      const [ins] = await db.insert(promotions).values({
+      const nowStr = new Date().toISOString();
+      const ins = {
+        id: uuidv4(),
         name: p.name, scope: p.scope, productId,
         minQuantity: p.minQty, minOrderAmount: p.minOrderAmount || null,
         discountType: p.discountType, discountValue: p.discountValue,
         validFrom: new Date(Date.now() - 365*24*60*60*1000).toISOString(),
         validUntil: new Date(Date.now() + 365*24*60*60*1000).toISOString(),
-      }).returning();
+        createdAt: nowStr, updatedAt: nowStr,
+      };
+      await db.collection(promotions.tableName).insertOne(ins);
       allPromotions.push(ins);
     }
   }
@@ -346,22 +399,26 @@ async function seedAll() {
   for (const s of sessionData) {
     const openedAt = shiftDate(now, s.daysBack, s.openedHour, 0);
     const label = s.label;
-    const [existing] = await db.select().from(sessions)
-      .where(sql`DATE(${sessions.openedAt}) = ${openedAt.toISOString().split('T')[0]}`)
-      .limit(1);
+    const dateStr = openedAt.toISOString().split('T')[0];
+    const existing = await db.collection(sessions.tableName).findOne({
+      openedAt: { $regex: `^${dateStr}` }
+    });
     if (existing) {
       allSessions.push(existing);
     } else {
+      const nowStr = new Date().toISOString();
       const vals = {
+        id: uuidv4(),
         status: s.status, openedBy: adminUser.id, openedAt: toISO(openedAt),
+        createdAt: nowStr, updatedAt: nowStr,
       };
       if (s.closedHour !== null) {
         const closedAt = shiftDate(now, s.daysBack, s.closedHour, 0);
         vals.closedAt = toISO(closedAt);
         vals.closingAmount = '0';
       }
-      const [ins] = await db.insert(sessions).values(vals).returning();
-      allSessions.push(ins);
+      await db.collection(sessions.tableName).insertOne(vals);
+      allSessions.push(vals);
     }
   }
   console.log(`  ✓ ${allSessions.length} sessions ready`);
@@ -423,7 +480,7 @@ async function seedAll() {
     const status = item.isDraft ? 'draft' : item.isCancelled ? 'cancelled' : 'paid';
 
     // Check if order already exists
-    const [existingOrder] = await db.select().from(orders).where(eq(orders.orderNumber, orderNumber)).limit(1);
+    const existingOrder = await db.collection(orders.tableName).findOne({ orderNumber });
     if (existingOrder) {
       console.log(`  ~ ${item.label.padEnd(20)} #${orderNumber} already exists`);
       orderCount++;
@@ -432,6 +489,7 @@ async function seedAll() {
 
     const orderDate = toISO(item.date);
     const orderVals = {
+      id: uuidv4(),
       orderNumber, status,
       tableId: item.table?.id || null,
       customerId: item.customer?.id || null,
@@ -449,14 +507,17 @@ async function seedAll() {
       orderVals.cancelledAt = orderDate;
       orderVals.cancelReason = 'Customer requested cancellation';
     }
-    const [order] = await db.insert(orders).values(orderVals).returning();
+    await db.collection(orders.tableName).insertOne(orderVals);
+    const order = orderVals;
 
     // Order Lines
     for (const l of lines) {
-      await db.insert(orderLines).values({
+      await db.collection(orderLines.tableName).insertOne({
+        id: uuidv4(),
         orderId: order.id, productId: l.product.id,
         quantity: l.qty, unitPrice: l.unitPrice.toFixed(2),
         lineTotal: l.lineTotal.toFixed(2), createdAt: orderDate,
+        updatedAt: orderDate,
       });
     }
 
@@ -465,32 +526,41 @@ async function seedAll() {
     if (!item.isDraft && !item.isCancelled) {
       const methodType = pick(['cash', 'card', 'upi'], rand);
       const amountReceived = methodType === 'cash' ? Math.ceil(total / 100) * 100 : total;
-      [payment] = await db.insert(payments).values({
+      const paymentVals = {
+        id: uuidv4(),
         orderId: order.id, method: methodType,
         amount: total.toFixed(2),
         amountReceived: amountReceived.toFixed(2),
         changeDue: (amountReceived - total).toFixed(2),
         status: 'confirmed', confirmedAt: orderDate, createdAt: orderDate,
-      }).returning();
+        updatedAt: orderDate,
+      };
+      await db.collection(payments.tableName).insertOne(paymentVals);
+      payment = paymentVals;
     }
 
     // KDS Ticket (only for paid orders with kds-enabled products)
     if (!item.isDraft && !item.isCancelled) {
       const kdsLines = lines.filter(l => l.product.kdsEnabled);
       if (kdsLines.length > 0) {
-        const [ticket] = await db.insert(kdsTickets).values({
+        const ticketVals = {
+          id: uuidv4(),
           orderId: order.id,
           ticketNumber: `KDS-${String(100 + orderCount).padStart(3, '0')}`,
           stage: pick(['to_cook', 'cooking', 'completed'], rand),
           sentAt: orderDate, createdAt: orderDate, updatedAt: orderDate,
-        }).returning();
+        };
+        await db.collection(kdsTickets.tableName).insertOne(ticketVals);
+        const ticket = ticketVals;
 
         for (const kl of kdsLines) {
           const completed = ticket.stage === 'completed';
-          await db.insert(kdsTicketItems).values({
+          await db.collection(kdsTicketItems.tableName).insertOne({
+            id: uuidv4(),
             ticketId: ticket.id, productId: kl.product.id,
             productName: kl.product.name, quantity: kl.qty,
             completed, completedAt: completed ? orderDate : null,
+            createdAt: orderDate, updatedAt: orderDate,
           });
         }
       }
@@ -498,8 +568,10 @@ async function seedAll() {
 
     // Receipt (for paid orders with a customer email)
     if (!item.isDraft && !item.isCancelled && item.customer?.email) {
-      await db.insert(receipts).values({
+      await db.collection(receipts.tableName).insertOne({
+        id: uuidv4(),
         orderId: order.id, email: item.customer.email, sentAt: orderDate,
+        createdAt: orderDate, updatedAt: orderDate,
       });
     }
 

@@ -7,7 +7,6 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError, ConflictError } = require('../utils/errors');
 const { db } = require('../db');
 const { tables, floors, orders } = require('../db/schema');
-const { eq, and, like, sql, isNull } = require('drizzle-orm');
 const QRCode = require('qrcode');
 const PDFDocument = require('pdfkit');
 const { frontendUrl } = require('../config/env');
@@ -32,21 +31,24 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { floor_id, status, active, search } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (floor_id) conditions.push(eq(tables.floorId, floor_id));
-    if (active !== undefined) conditions.push(eq(tables.active, active === 'true'));
-    if (search) conditions.push(like(sql`CAST(${tables.tableNumber} AS TEXT)`, `%${search}%`));
+    const filter = {};
+    if (floor_id) filter.floorId = floor_id;
+    if (active !== undefined) filter.active = active === 'true';
+    if (search) {
+      const num = parseInt(search, 10);
+      if (!isNaN(num)) {
+        filter.tableNumber = num;
+      } else {
+        filter.$expr = { $regexMatch: { input: { $toString: "$tableNumber" }, regex: search, options: "i" } };
+      }
+    }
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
+    const count = await db.collection(tables.tableName).countDocuments(filter);
+    const cursor = await db.collection(tables.tableName).find(filter);
+    const data = await cursor.sort({ tableNumber: 1 }).skip(offset).limit(pageSize).toArray();
 
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(tables).where(where).limit(pageSize).offset(offset).orderBy(tables.tableNumber),
-      db.select({ count: sql`count(*)` }).from(tables).where(where),
-    ]);
-
-    const allDraftOrders = await db.select({ tableId: orders.tableId, id: orders.id })
-      .from(orders)
-      .where(eq(orders.status, 'draft'));
+    const draftOrdersCursor = await db.collection(orders.tableName).find({ status: 'draft' });
+    const allDraftOrders = await draftOrdersCursor.toArray();
     const occupiedMap = {};
     allDraftOrders.forEach((o) => { occupiedMap[o.tableId] = o.id; });
 
@@ -62,25 +64,22 @@ router.get('/', parsePagination, async (req, res, next) => {
       qr_url: `${frontendUrl}/s/${t.qrToken}`,
     }));
 
-    sendPaginated(res, result, { page, pageSize, totalCount: parseInt(count, 10) });
+    sendPaginated(res, result, { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 
 router.get('/:table_id', async (req, res, next) => {
   try {
-    const [t] = await db.select().from(tables).where(eq(tables.id, req.params.table_id)).limit(1);
+    const t = await db.collection(tables.tableName).findOne({ id: req.params.table_id });
     if (!t) return next(new NotFoundError('Table not found.'));
 
     let floorData = null;
     if (t.floorId) {
-      const [f] = await db.select().from(floors).where(eq(floors.id, t.floorId)).limit(1);
+      const f = await db.collection(floors.tableName).findOne({ id: t.floorId });
       if (f) floorData = { id: f.id, name: f.name };
     }
 
-    const [draftOrder] = await db.select({ id: orders.id })
-      .from(orders)
-      .where(and(eq(orders.tableId, t.id), eq(orders.status, 'draft')))
-      .limit(1);
+    const draftOrder = await db.collection(orders.tableName).findOne({ tableId: t.id, status: 'draft' });
     const status = draftOrder ? 'occupied' : 'available';
     const currentOrderId = draftOrder ? draftOrder.id : null;
 
@@ -95,18 +94,21 @@ router.get('/:table_id', async (req, res, next) => {
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
     const qrToken = `tbl_${require('uuid').v4().slice(0, 8)}`;
-    const vals = {
+    const t = {
+      id: require('uuid').v4(),
       floorId: req.body.floor_id,
       tableNumber: req.body.table_number,
       seats: req.body.seats || 2,
       active: req.body.active !== undefined ? req.body.active : true,
       qrToken,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
 
-    const [t] = await db.insert(tables).values(vals).returning();
+    await db.collection(tables.tableName).insertOne(t);
     let floorData = null;
     if (t.floorId) {
-      const [f] = await db.select().from(floors).where(eq(floors.id, t.floorId)).limit(1);
+      const f = await db.collection(floors.tableName).findOne({ id: t.floorId });
       if (f) floorData = { id: f.id, name: f.name };
     }
 
@@ -124,24 +126,30 @@ router.put('/:table_id', requireRole('admin'), validate(updateSchema), async (re
     if (req.body.seats) updates.seats = req.body.seats;
     if (req.body.active !== undefined) updates.active = req.body.active;
 
-    const [t] = await db.update(tables).set(updates).where(eq(tables.id, req.params.table_id)).returning();
-    if (!t) return next(new NotFoundError('Table not found.'));
+    const resUpdate = await db.collection(tables.tableName).updateOne(
+      { id: req.params.table_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Table not found.'));
+    }
+    const t = await db.collection(tables.tableName).findOne({ id: req.params.table_id });
     sendSuccess(res, { id: t.id, seats: t.seats, active: t.active, updated_at: t.updatedAt });
   } catch (err) { next(err); }
 });
 
 router.delete('/:table_id', requireRole('admin'), async (req, res, next) => {
   try {
-    const [t] = await db.select().from(tables).where(eq(tables.id, req.params.table_id)).limit(1);
+    const t = await db.collection(tables.tableName).findOne({ id: req.params.table_id });
     if (!t) return next(new NotFoundError('Table not found.'));
 
     const { orders } = require('../db/schema');
-    const [activeOrder] = await db.select().from(orders).where(and(eq(orders.tableId, req.params.table_id), eq(orders.status, 'draft'))).limit(1);
+    const activeOrder = await db.collection(orders.tableName).findOne({ tableId: req.params.table_id, status: 'draft' });
     if (activeOrder) {
       return next(new ConflictError('RESOURCE_IN_USE', 'Table has an active order and cannot be deleted.'));
     }
 
-    await db.delete(tables).where(eq(tables.id, req.params.table_id));
+    await db.collection(tables.tableName).deleteOne({ id: req.params.table_id });
     res.status(204).send();
   } catch (err) { next(err); }
 });
@@ -149,10 +157,11 @@ router.delete('/:table_id', requireRole('admin'), async (req, res, next) => {
 router.get('/qr-codes/pdf', async (req, res, next) => {
   try {
     const { floor_id } = req.query;
-    const conditions = [eq(tables.active, true)];
-    if (floor_id) conditions.push(eq(tables.floorId, floor_id));
+    const filter = { active: true };
+    if (floor_id) filter.floorId = floor_id;
 
-    const tableList = await db.select().from(tables).where(and(...conditions)).orderBy(tables.tableNumber);
+    const cursor = await db.collection(tables.tableName).find(filter);
+    const tableList = await cursor.sort({ tableNumber: 1 }).toArray();
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'attachment; filename=table-qr-codes.pdf');

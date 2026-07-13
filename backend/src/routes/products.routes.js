@@ -7,7 +7,6 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError } = require('../utils/errors');
 const { db } = require('../db');
 const { products, categories } = require('../db/schema');
-const { eq, and, like, sql, isNull } = require('drizzle-orm');
 
 const router = Router();
 router.use(authenticate);
@@ -39,39 +38,36 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { category_id, search, kds_enabled } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [isNull(products.deletedAt)];
-    if (category_id) conditions.push(eq(products.categoryId, category_id));
-    if (search) conditions.push(like(products.name, `%${search}%`));
-    if (kds_enabled !== undefined) conditions.push(eq(products.kdsEnabled, kds_enabled === 'true'));
+    const filter = { deletedAt: null };
+    if (category_id) filter.categoryId = category_id;
+    if (search) filter.name = { $regex: search, $options: 'i' };
+    if (kds_enabled !== undefined) filter.kdsEnabled = kds_enabled === 'true';
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(products).where(where).limit(pageSize).offset(offset).orderBy(products.createdAt),
-      db.select({ count: sql`count(*)` }).from(products).where(where),
-    ]);
+    const count = await db.collection(products.tableName).countDocuments(filter);
+    const cursor = await db.collection(products.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: 1 }).skip(offset).limit(pageSize).toArray();
 
     const result = await Promise.all(data.map(async (p) => {
       let category = null;
       if (p.categoryId) {
-        const [cat] = await db.select().from(categories).where(eq(categories.id, p.categoryId)).limit(1);
+        const cat = await db.collection(categories.tableName).findOne({ id: p.categoryId });
         if (cat) category = { id: cat.id, name: cat.name, color: cat.color };
       }
       return { id: p.id, name: p.name, category, price: p.price, unit_of_measure: p.unitOfMeasure, tax_percent: p.taxPercent, description: p.description, kds_enabled: p.kdsEnabled, image_url: p.imageUrl, created_at: p.createdAt };
     }));
 
-    sendPaginated(res, result, { page, pageSize, totalCount: parseInt(count, 10) });
+    sendPaginated(res, result, { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 
 router.get('/:product_id', async (req, res, next) => {
   try {
-    const [p] = await db.select().from(products).where(and(eq(products.id, req.params.product_id), isNull(products.deletedAt))).limit(1);
+    const p = await db.collection(products.tableName).findOne({ id: req.params.product_id, deletedAt: null });
     if (!p) return next(new NotFoundError('Product not found.'));
 
     let category = null;
     if (p.categoryId) {
-      const [cat] = await db.select().from(categories).where(eq(categories.id, p.categoryId)).limit(1);
+      const cat = await db.collection(categories.tableName).findOne({ id: p.categoryId });
       if (cat) category = { id: cat.id, name: cat.name, color: cat.color };
     }
 
@@ -81,7 +77,8 @@ router.get('/:product_id', async (req, res, next) => {
 
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
-    const vals = {
+    const p = {
+      id: require('uuid').v4(),
       name: req.body.name,
       categoryId: req.body.category_id,
       price: req.body.price,
@@ -90,13 +87,16 @@ router.post('/', requireRole('admin'), validate(createSchema), async (req, res, 
       description: req.body.description || null,
       kdsEnabled: req.body.kds_enabled || false,
       imageUrl: req.body.image_url || null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      deletedAt: null,
     };
 
-    const [p] = await db.insert(products).values(vals).returning();
+    await db.collection(products.tableName).insertOne(p);
 
     let category = null;
     if (p.categoryId) {
-      const [cat] = await db.select().from(categories).where(eq(categories.id, p.categoryId)).limit(1);
+      const cat = await db.collection(categories.tableName).findOne({ id: p.categoryId });
       if (cat) category = { id: cat.id, name: cat.name, color: cat.color };
     }
 
@@ -116,19 +116,28 @@ router.put('/:product_id', requireRole('admin'), validate(updateSchema), async (
     if (req.body.kds_enabled !== undefined) updates.kdsEnabled = req.body.kds_enabled;
     if (req.body.image_url !== undefined) updates.imageUrl = req.body.image_url;
 
-    const [p] = await db.update(products).set(updates).where(eq(products.id, req.params.product_id)).returning();
-    if (!p) return next(new NotFoundError('Product not found.'));
+    const resUpdate = await db.collection(products.tableName).updateOne(
+      { id: req.params.product_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Product not found.'));
+    }
 
+    const p = await db.collection(products.tableName).findOne({ id: req.params.product_id });
     sendSuccess(res, { id: p.id, name: p.name, price: p.price, updated_at: p.updatedAt });
   } catch (err) { next(err); }
 });
 
 router.delete('/:product_id', requireRole('admin'), async (req, res, next) => {
   try {
-    const [p] = await db.select().from(products).where(eq(products.id, req.params.product_id)).limit(1);
+    const p = await db.collection(products.tableName).findOne({ id: req.params.product_id });
     if (!p) return next(new NotFoundError('Product not found.'));
 
-    await db.update(products).set({ deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }).where(eq(products.id, req.params.product_id));
+    await db.collection(products.tableName).updateOne(
+      { id: req.params.product_id },
+      { $set: { deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } }
+    );
     res.status(204).send();
   } catch (err) { next(err); }
 });

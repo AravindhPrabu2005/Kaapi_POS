@@ -2,7 +2,6 @@ const { Router } = require('express');
 const { sendSuccess } = require('../utils/response');
 const { db } = require('../db');
 const { orders, orderLines, products, payments } = require('../db/schema');
-const { eq, desc } = require('drizzle-orm');
 
 const router = Router();
 
@@ -13,7 +12,9 @@ router.get('/state', async (req, res, next) => {
       return sendSuccess(res, { view: 'idle', message: 'No table selected.' });
     }
 
-    const [order] = await db.select().from(orders).where(eq(orders.tableId, table_id)).orderBy(desc(orders.createdAt)).limit(1);
+    const orderCursor = await db.collection(orders.tableName).find({ tableId: table_id });
+    const ordersList = await orderCursor.sort({ createdAt: -1 }).limit(1).toArray();
+    const order = ordersList[0];
     if (!order) {
       return sendSuccess(res, { view: 'idle', message: 'No active order.' });
     }
@@ -23,10 +24,11 @@ router.get('/state', async (req, res, next) => {
     }
 
     if (order.status === 'draft') {
-      const lines = await db.select().from(orderLines).where(eq(orderLines.orderId, order.id));
+      const linesCursor = await db.collection(orderLines.tableName).find({ orderId: order.id });
+      const lines = await linesCursor.toArray();
       const lineData = await Promise.all(lines.map(async (l) => {
         let name = 'Unknown';
-        const [p] = await db.select().from(products).where(eq(products.id, l.productId)).limit(1);
+        const p = await db.collection(products.tableName).findOne({ id: l.productId });
         if (p) name = p.name;
         return { product_name: name, quantity: l.quantity, unit_price: l.unitPrice, line_total: l.lineTotal };
       }));

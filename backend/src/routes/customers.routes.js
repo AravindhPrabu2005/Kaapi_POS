@@ -7,7 +7,6 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError } = require('../utils/errors');
 const { db } = require('../db');
 const { customers } = require('../db/schema');
-const { eq, like, or, sql } = require('drizzle-orm');
 
 const router = Router();
 router.use(authenticate);
@@ -29,44 +28,50 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { search } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (search) conditions.push(or(like(customers.name, `%${search}%`), like(customers.email, `%${search}%`)));
+    const filter = {};
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
 
-    const where = conditions.length > 0 ? or(...conditions) : undefined;
-
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(customers).where(where).limit(pageSize).offset(offset).orderBy(customers.createdAt),
-      db.select({ count: sql`count(*)` }).from(customers).where(where),
-    ]);
+    const count = await db.collection(customers.tableName).countDocuments(filter);
+    const cursor = await db.collection(customers.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: 1 }).skip(offset).limit(pageSize).toArray();
 
     sendPaginated(res, data.map((c) => ({
       id: c.id, name: c.name, email: c.email, phone: c.phone,
-    })), { page, pageSize, totalCount: parseInt(count, 10) });
+    })), { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 
 router.get('/:customer_id', async (req, res, next) => {
   try {
-    const [c] = await db.select().from(customers).where(eq(customers.id, req.params.customer_id)).limit(1);
+    const c = await db.collection(customers.tableName).findOne({ id: req.params.customer_id });
     if (!c) return next(new NotFoundError('Customer not found.'));
 
     const { orders } = require('../db/schema');
-    const [{ count }] = await db.select({ count: sql`count(*)` }).from(orders).where(eq(orders.customerId, c.id));
+    const count = await db.collection(orders.tableName).countDocuments({ customerId: c.id });
 
     sendSuccess(res, {
       id: c.id, name: c.name, email: c.email, phone: c.phone,
-      created_at: c.createdAt, order_count: parseInt(count, 10),
+      created_at: c.createdAt, order_count: count,
     });
   } catch (err) { next(err); }
 });
 
 router.post('/', validate(createSchema), async (req, res, next) => {
   try {
-    const [c] = await db.insert(customers).values({
+    const c = {
+      id: require('uuid').v4(),
       name: req.body.name,
       email: req.body.email || null,
       phone: req.body.phone || null,
-    }).returning();
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(customers.tableName).insertOne(c);
 
     sendSuccess(res, { id: c.id, name: c.name, email: c.email, phone: c.phone, created_at: c.createdAt }, null, 201);
   } catch (err) { next(err); }
@@ -79,8 +84,15 @@ router.put('/:customer_id', validate(updateSchema), async (req, res, next) => {
     if (req.body.email !== undefined) updates.email = req.body.email;
     if (req.body.phone !== undefined) updates.phone = req.body.phone;
 
-    const [c] = await db.update(customers).set(updates).where(eq(customers.id, req.params.customer_id)).returning();
-    if (!c) return next(new NotFoundError('Customer not found.'));
+    const resUpdate = await db.collection(customers.tableName).updateOne(
+      { id: req.params.customer_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Customer not found.'));
+    }
+
+    const c = await db.collection(customers.tableName).findOne({ id: req.params.customer_id });
 
     sendSuccess(res, { id: c.id, name: c.name, email: c.email, phone: c.phone, updated_at: c.updatedAt });
   } catch (err) { next(err); }
@@ -88,9 +100,9 @@ router.put('/:customer_id', validate(updateSchema), async (req, res, next) => {
 
 router.delete('/:customer_id', async (req, res, next) => {
   try {
-    const [c] = await db.select().from(customers).where(eq(customers.id, req.params.customer_id)).limit(1);
+    const c = await db.collection(customers.tableName).findOne({ id: req.params.customer_id });
     if (!c) return next(new NotFoundError('Customer not found.'));
-    await db.delete(customers).where(eq(customers.id, req.params.customer_id));
+    await db.collection(customers.tableName).deleteOne({ id: req.params.customer_id });
     res.status(204).send();
   } catch (err) { next(err); }
 });

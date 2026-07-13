@@ -6,7 +6,7 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError, ConflictError, ValidationError } = require('../utils/errors');
 const { db } = require('../db');
 const { orders, payments } = require('../db/schema');
-const { eq } = require('drizzle-orm');
+const { v4: uuidv4 } = require('uuid');
 const QRCode = require('qrcode');
 
 const router = Router();
@@ -24,14 +24,14 @@ const confirmSchema = z.object({
 
 router.post('/:order_id/payments/initiate', validate(initiateSchema), async (req, res, next) => {
   try {
-    const [order] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
     const { payment_method, amount_received, transaction_reference } = req.body;
 
     if (payment_method === 'upi') {
       const { paymentMethods } = require('../db/schema');
-      const [upiMethod] = await db.select().from(paymentMethods).where(eq(paymentMethods.type, 'upi')).limit(1);
+      const upiMethod = await db.collection(paymentMethods.tableName).findOne({ type: 'upi' });
       const upiId = upiMethod?.upiId || 'cafe@ybl';
 
       const qrString = `upi://pay?pa=${upiId}&am=${order.total}&cu=INR&tn=Order%20${encodeURIComponent(order.orderNumber)}`;
@@ -65,35 +65,44 @@ router.post('/:order_id/payments/initiate', validate(initiateSchema), async (req
 
 router.post('/:order_id/payments/confirm', validate(confirmSchema), async (req, res, next) => {
   try {
-    const [order] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const [payment] = await db.insert(payments).values({
+    const paymentId = uuidv4();
+    const confirmedAt = new Date().toISOString();
+    const paymentDoc = {
+      id: paymentId,
       orderId: req.params.order_id,
       method: req.body.payment_method,
       amount: order.total,
       status: 'confirmed',
-      confirmedAt: new Date().toISOString(),
-    }).returning();
+      confirmedAt,
+      createdAt: confirmedAt,
+      updatedAt: confirmedAt,
+    };
+    await db.collection(payments.tableName).insertOne(paymentDoc);
 
-    await db.update(orders).set({ status: 'paid', updatedAt: new Date().toISOString() }).where(eq(orders.id, req.params.order_id));
+    await db.collection(orders.tableName).updateOne(
+      { id: req.params.order_id },
+      { $set: { status: 'paid', updatedAt: confirmedAt } }
+    );
 
     sendSuccess(res, {
       order_id: order.id, order_status: 'paid',
-      payment: { id: payment.id, method: payment.method, amount: payment.amount, confirmed_at: payment.confirmedAt },
+      payment: { id: paymentDoc.id, method: paymentDoc.method, amount: paymentDoc.amount, confirmed_at: paymentDoc.confirmedAt },
     });
   } catch (err) { next(err); }
 });
 
 router.post('/:order_id/payments/cancel', async (req, res, next) => {
   try {
-    const [order] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const existingPayments = await db.select().from(payments).where(eq(payments.orderId, req.params.order_id));
-    for (const p of existingPayments) {
-      await db.update(payments).set({ status: 'cancelled' }).where(eq(payments.id, p.id));
-    }
+    await db.collection(payments.tableName).updateMany(
+      { orderId: req.params.order_id },
+      { $set: { status: 'cancelled', updatedAt: new Date().toISOString() } }
+    );
 
     sendSuccess(res, {
       order_id: order.id, order_status: 'draft',
@@ -104,10 +113,10 @@ router.post('/:order_id/payments/cancel', async (req, res, next) => {
 
 router.get('/:order_id/payments', async (req, res, next) => {
   try {
-    const [order] = await db.select().from(orders).where(eq(orders.id, req.params.order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const [payment] = await db.select().from(payments).where(eq(payments.orderId, req.params.order_id)).limit(1);
+    const payment = await db.collection(payments.tableName).findOne({ orderId: req.params.order_id });
     if (!payment) return sendSuccess(res, null);
 
     sendSuccess(res, {

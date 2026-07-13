@@ -3,7 +3,6 @@ const { authenticate } = require('../middleware/auth');
 const { sendSuccess } = require('../utils/response');
 const { db } = require('../db');
 const { orders, orderLines, products, categories, payments, sessions, users, tables } = require('../db/schema');
-const { eq, and, gte, lte, sql, ne } = require('drizzle-orm');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
 
@@ -59,15 +58,15 @@ function getPreviousRange(period, from, to) {
   return { start: prevStart.toISOString(), end: prevEnd.toISOString() };
 }
 
-async function getOrderStats(start, end, extraConditions = []) {
-  const conditions = [
-    gte(orders.createdAt, start),
-    lte(orders.createdAt, end),
-    eq(orders.status, 'paid'),
-    ...extraConditions,
-  ];
+async function getOrderStats(start, end, extraFilter = {}) {
+  const filter = {
+    createdAt: { $gte: start, $lte: end },
+    status: 'paid',
+    ...extraFilter,
+  };
 
-  const paidOrders = await db.select().from(orders).where(and(...conditions)).orderBy(orders.createdAt);
+  const cursor = await db.collection(orders.tableName).find(filter);
+  const paidOrders = await cursor.sort({ createdAt: 1 }).toArray();
 
   let totalOrders = paidOrders.length;
   let revenue = 0;
@@ -96,13 +95,14 @@ router.get('/dashboard', async (req, res, next) => {
     const { period, from, to, employee_id, session_id } = req.query;
     const { start, end } = getDateRange(period || 'this_week', from, to);
 
+    const extraFilter = {};
+    if (employee_id) extraFilter.employeeId = employee_id;
+    if (session_id) extraFilter.sessionId = session_id;
+
     const {
       paidOrders, totalOrders, revenue, taxCollected, discountGiven, subtotalSum,
       dineInCount, takeawayCount, avgOrderValue,
-    } = await getOrderStats(start, end, [
-      ...(employee_id ? [eq(orders.employeeId, employee_id)] : []),
-      ...(session_id ? [eq(orders.sessionId, session_id)] : []),
-    ]);
+    } = await getOrderStats(start, end, extraFilter);
 
     const salesByDate = {};
     for (const o of paidOrders) {
@@ -117,11 +117,12 @@ router.get('/dashboard', async (req, res, next) => {
 
     const categoryRevenue = {};
     for (const o of paidOrders) {
-      const lines = await db.select().from(orderLines).where(eq(orderLines.orderId, o.id));
+      const linesCursor = await db.collection(orderLines.tableName).find({ orderId: o.id });
+      const lines = await linesCursor.toArray();
       for (const line of lines) {
-        const [p] = await db.select().from(products).where(eq(products.id, line.productId)).limit(1);
+        const p = await db.collection(products.tableName).findOne({ id: line.productId });
         if (p && p.categoryId) {
-          const [cat] = await db.select().from(categories).where(eq(categories.id, p.categoryId)).limit(1);
+          const cat = await db.collection(categories.tableName).findOne({ id: p.categoryId });
           const catName = cat ? cat.name : 'Uncategorized';
           categoryRevenue[catName] = (categoryRevenue[catName] || 0) + parseFloat(line.lineTotal);
         }
@@ -134,9 +135,10 @@ router.get('/dashboard', async (req, res, next) => {
 
     const productSales = {};
     for (const o of paidOrders) {
-      const lines = await db.select().from(orderLines).where(eq(orderLines.orderId, o.id));
+      const linesCursor = await db.collection(orderLines.tableName).find({ orderId: o.id });
+      const lines = await linesCursor.toArray();
       for (const line of lines) {
-        const [p] = await db.select().from(products).where(eq(products.id, line.productId)).limit(1);
+        const p = await db.collection(products.tableName).findOne({ id: line.productId });
         const name = p ? p.name : 'Unknown';
         productSales[name] = productSales[name] || { qty: 0, rev: 0 };
         productSales[name].qty += line.quantity;
@@ -160,7 +162,8 @@ router.get('/dashboard', async (req, res, next) => {
     // Payment breakdown
     const paymentBreakdown = {};
     for (const o of paidOrders) {
-      const pays = await db.select().from(payments).where(eq(payments.orderId, o.id));
+      const paysCursor = await db.collection(payments.tableName).find({ orderId: o.id });
+      const pays = await paysCursor.toArray();
       for (const p of pays) {
         if (p.status === 'confirmed') {
           paymentBreakdown[p.method] = paymentBreakdown[p.method] || { amount: 0, count: 0 };
@@ -198,7 +201,7 @@ router.get('/dashboard', async (req, res, next) => {
     }
     const employeePerformance = [];
     for (const [empId, vals] of Object.entries(employeeMap)) {
-      const [emp] = await db.select().from(users).where(eq(users.id, empId)).limit(1);
+      const emp = await db.collection(users.tableName).findOne({ id: empId });
       employeePerformance.push({
         name: emp ? emp.name : 'Unknown',
         order_count: vals.order_count,
@@ -262,15 +265,15 @@ router.post('/export', async (req, res, next) => {
     const { format, period, from, to, employee_id, session_id } = req.body;
 
     const { start, end } = getDateRange(period || 'this_month', from, to);
-    const conditions = [
-      gte(orders.createdAt, start),
-      lte(orders.createdAt, end),
-      eq(orders.status, 'paid'),
-    ];
-    if (employee_id) conditions.push(eq(orders.employeeId, employee_id));
-    if (session_id) conditions.push(eq(orders.sessionId, session_id));
+    const filter = {
+      createdAt: { $gte: start, $lte: end },
+      status: 'paid',
+    };
+    if (employee_id) filter.employeeId = employee_id;
+    if (session_id) filter.sessionId = session_id;
 
-    const paidOrders = await db.select().from(orders).where(and(...conditions)).orderBy(orders.createdAt);
+    const cursor = await db.collection(orders.tableName).find(filter);
+    const paidOrders = await cursor.sort({ createdAt: 1 }).toArray();
 
     const fileName = `sales-report-${Date.now()}`;
 

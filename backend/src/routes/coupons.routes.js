@@ -7,7 +7,6 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError, ConflictError } = require('../utils/errors');
 const { db } = require('../db');
 const { coupons, orders, couponUsages, customers } = require('../db/schema');
-const { eq, and, like, sql, lte, gte, isNull, or } = require('drizzle-orm');
 
 const router = Router();
 router.use(authenticate);
@@ -43,28 +42,29 @@ router.get('/', parsePagination, async (req, res, next) => {
     const { active, search } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (active !== undefined) conditions.push(eq(coupons.active, active === 'true'));
-    if (search) conditions.push(like(coupons.code, `%${search}%`));
+    const filter = {};
+    if (active !== undefined) {
+      filter.active = active === 'true';
+    }
+    if (search) {
+      filter.code = { $regex: search, $options: 'i' };
+    }
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const [data, [{ count }]] = await Promise.all([
-      db.select().from(coupons).where(where).limit(pageSize).offset(offset).orderBy(coupons.createdAt),
-      db.select({ count: sql`count(*)` }).from(coupons).where(where),
-    ]);
+    const count = await db.collection(coupons.tableName).countDocuments(filter);
+    const cursor = await db.collection(coupons.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: 1 }).skip(offset).limit(pageSize).toArray();
 
     sendPaginated(res, data.map((c) => ({
       id: c.id, code: c.code, discount_type: c.discountType, discount_value: c.discountValue,
       active: c.active, max_uses: c.maxUses, redemption_count: c.redemptionCount,
       valid_from: c.validFrom, valid_until: c.validUntil, created_at: c.createdAt,
-    })), { page, pageSize, totalCount: parseInt(count, 10) });
+    })), { page, pageSize, totalCount: count });
   } catch (err) { next(err); }
 });
 
 router.get('/:coupon_id', async (req, res, next) => {
   try {
-    const [c] = await db.select().from(coupons).where(eq(coupons.id, req.params.coupon_id)).limit(1);
+    const c = await db.collection(coupons.tableName).findOne({ id: req.params.coupon_id });
     if (!c) return next(new NotFoundError('Coupon not found.'));
     sendSuccess(res, {
       id: c.id, code: c.code, discount_type: c.discountType, discount_value: c.discountValue,
@@ -76,20 +76,25 @@ router.get('/:coupon_id', async (req, res, next) => {
 
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
-    const existing = await db.select().from(coupons).where(eq(coupons.code, req.body.code)).limit(1);
-    if (existing.length > 0) {
+    const existing = await db.collection(coupons.tableName).findOne({ code: req.body.code });
+    if (existing) {
       return next(new ConflictError('DUPLICATE_CODE', `A coupon with code '${req.body.code}' already exists.`));
     }
 
-    const [c] = await db.insert(coupons).values({
+    const c = {
+      id: require('uuid').v4(),
       code: req.body.code,
       discountType: req.body.discount_type,
       discountValue: req.body.discount_value,
       active: req.body.active !== undefined ? req.body.active : true,
       maxUses: req.body.max_uses || null,
+      redemptionCount: 0,
       validFrom: req.body.valid_from || null,
       validUntil: req.body.valid_until || null,
-    }).returning();
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(coupons.tableName).insertOne(c);
 
     sendSuccess(res, {
       id: c.id, code: c.code, discount_type: c.discountType, discount_value: c.discountValue,
@@ -111,8 +116,15 @@ router.put('/:coupon_id', requireRole('admin'), validate(updateSchema), async (r
     if (req.body.valid_from_null) updates.validFrom = null;
     if (req.body.valid_until_null) updates.validUntil = null;
 
-    const [c] = await db.update(coupons).set(updates).where(eq(coupons.id, req.params.coupon_id)).returning();
-    if (!c) return next(new NotFoundError('Coupon not found.'));
+    const resUpdate = await db.collection(coupons.tableName).updateOne(
+      { id: req.params.coupon_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Coupon not found.'));
+    }
+
+    const c = await db.collection(coupons.tableName).findOne({ id: req.params.coupon_id });
 
     sendSuccess(res, {
       id: c.id, code: c.code, discount_type: c.discountType, discount_value: c.discountValue,
@@ -124,11 +136,11 @@ router.put('/:coupon_id', requireRole('admin'), validate(updateSchema), async (r
 
 router.delete('/:coupon_id', requireRole('admin'), async (req, res, next) => {
   try {
-    const [c] = await db.select().from(coupons).where(eq(coupons.id, req.params.coupon_id)).limit(1);
+    const c = await db.collection(coupons.tableName).findOne({ id: req.params.coupon_id });
     if (!c) return next(new NotFoundError('Coupon not found.'));
-    await db.delete(couponUsages).where(eq(couponUsages.couponId, req.params.coupon_id));
-    await db.update(orders).set({ couponId: null }).where(eq(orders.couponId, req.params.coupon_id));
-    await db.delete(coupons).where(eq(coupons.id, req.params.coupon_id));
+    await db.collection(couponUsages.tableName).deleteMany({ couponId: req.params.coupon_id });
+    await db.collection(orders.tableName).updateMany({ couponId: req.params.coupon_id }, { $set: { couponId: null } });
+    await db.collection(coupons.tableName).deleteOne({ id: req.params.coupon_id });
     res.status(204).send();
   } catch (err) { next(err); }
 });
@@ -136,11 +148,14 @@ router.delete('/:coupon_id', requireRole('admin'), async (req, res, next) => {
 router.get('/lookup/:code', async (req, res, next) => {
   try {
     const now = new Date().toISOString();
-    const [coupon] = await db.select().from(coupons).where(
-      and(eq(coupons.code, req.params.code.toUpperCase()), eq(coupons.active, true),
-        or(isNull(coupons.validFrom), lte(coupons.validFrom, now)),
-        or(isNull(coupons.validUntil), gte(coupons.validUntil, now)))
-    ).limit(1);
+    const coupon = await db.collection(coupons.tableName).findOne({
+      code: req.params.code.toUpperCase(),
+      active: true,
+      $and: [
+        { $or: [{ validFrom: null }, { validFrom: { $lte: now } }] },
+        { $or: [{ validUntil: null }, { validUntil: { $gte: now } }] }
+      ]
+    });
     if (!coupon) return next(new NotFoundError('INVALID_COUPON', 'Coupon code is invalid, expired, or inactive.'));
     if (coupon.maxUses && coupon.redemptionCount >= coupon.maxUses) {
       return next(new NotFoundError('COUPON_EXHAUSTED', 'This coupon has reached its maximum usage limit.'));
@@ -157,11 +172,14 @@ router.post('/validate', validate(validateSchema), async (req, res, next) => {
     const { code, order_id } = req.body;
 
     const now = new Date().toISOString();
-    const [coupon] = await db.select().from(coupons).where(
-      and(eq(coupons.code, code), eq(coupons.active, true),
-        or(isNull(coupons.validFrom), lte(coupons.validFrom, now)),
-        or(isNull(coupons.validUntil), gte(coupons.validUntil, now)))
-    ).limit(1);
+    const coupon = await db.collection(coupons.tableName).findOne({
+      code: code,
+      active: true,
+      $and: [
+        { $or: [{ validFrom: null }, { validFrom: { $lte: now } }] },
+        { $or: [{ validUntil: null }, { validUntil: { $gte: now } }] }
+      ]
+    });
     if (!coupon) {
       return next(new NotFoundError('INVALID_COUPON', `Coupon code '${code}' is invalid, expired, or inactive.`));
     }
@@ -170,13 +188,14 @@ router.post('/validate', validate(validateSchema), async (req, res, next) => {
       return next(new NotFoundError('COUPON_EXHAUSTED', 'This coupon has reached its maximum usage limit.'));
     }
 
-    const [order] = await db.select().from(orders).where(eq(orders.id, order_id)).limit(1);
+    const order = await db.collection(orders.tableName).findOne({ id: order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
     if (order.customerId) {
-      const [existingUsage] = await db.select().from(couponUsages)
-        .where(and(eq(couponUsages.couponId, coupon.id), eq(couponUsages.customerId, order.customerId)))
-        .limit(1);
+      const existingUsage = await db.collection(couponUsages.tableName).findOne({
+        couponId: coupon.id,
+        customerId: order.customerId
+      });
       if (existingUsage) {
         return next(new NotFoundError('COUPON_ALREADY_USED', 'This coupon has already been used by this customer.'));
       }

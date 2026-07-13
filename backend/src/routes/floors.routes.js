@@ -6,7 +6,6 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError, ConflictError } = require('../utils/errors');
 const { db } = require('../db');
 const { floors, tables, orders } = require('../db/schema');
-const { eq, and, like, sql } = require('drizzle-orm');
 
 const router = Router();
 router.use(authenticate);
@@ -17,14 +16,17 @@ const updateSchema = z.object({ name: z.string().min(1).max(255) });
 router.get('/', async (req, res, next) => {
   try {
     const { search } = req.query;
-    const conditions = [];
-    if (search) conditions.push(like(floors.name, `%${search}%`));
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
+    const filter = {};
+    if (search) {
+      filter.name = { $regex: search, $options: 'i' };
+    }
 
-    const data = await db.select().from(floors).where(where).orderBy(floors.createdAt);
+    const cursor = await db.collection(floors.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: 1 }).toArray();
+
     const result = await Promise.all(data.map(async (f) => {
-      const [{ count }] = await db.select({ count: sql`count(*)` }).from(tables).where(eq(tables.floorId, f.id));
-      return { id: f.id, name: f.name, table_count: parseInt(count, 10), created_at: f.createdAt };
+      const count = await db.collection(tables.tableName).countDocuments({ floorId: f.id });
+      return { id: f.id, name: f.name, table_count: count, created_at: f.createdAt };
     }));
     sendSuccess(res, result);
   } catch (err) { next(err); }
@@ -32,14 +34,14 @@ router.get('/', async (req, res, next) => {
 
 router.get('/:floor_id', async (req, res, next) => {
   try {
-    const [f] = await db.select().from(floors).where(eq(floors.id, req.params.floor_id)).limit(1);
+    const f = await db.collection(floors.tableName).findOne({ id: req.params.floor_id });
     if (!f) return next(new NotFoundError('Floor not found.'));
 
-    const tableList = await db.select().from(tables).where(eq(tables.floorId, f.id)).orderBy(tables.tableNumber);
+    const tablesCursor = await db.collection(tables.tableName).find({ floorId: f.id });
+    const tableList = await tablesCursor.sort({ tableNumber: 1 }).toArray();
 
-    const allDraftOrders = await db.select({ tableId: orders.tableId, id: orders.id })
-      .from(orders)
-      .where(eq(orders.status, 'draft'));
+    const ordersCursor = await db.collection(orders.tableName).find({ status: 'draft' }, { projection: { tableId: 1, id: 1 } });
+    const allDraftOrders = await ordersCursor.toArray();
     const occupiedMap = {};
     allDraftOrders.forEach((o) => { occupiedMap[o.tableId] = o.id; });
 
@@ -55,30 +57,43 @@ router.get('/:floor_id', async (req, res, next) => {
 
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
-    const [f] = await db.insert(floors).values(req.body).returning();
+    const f = {
+      id: require('uuid').v4(),
+      name: req.body.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(floors.tableName).insertOne(f);
     sendSuccess(res, { id: f.id, name: f.name, table_count: 0, created_at: f.createdAt }, null, 201);
   } catch (err) { next(err); }
 });
 
 router.put('/:floor_id', requireRole('admin'), validate(updateSchema), async (req, res, next) => {
   try {
-    const [f] = await db.update(floors).set({ name: req.body.name, updatedAt: new Date().toISOString() }).where(eq(floors.id, req.params.floor_id)).returning();
-    if (!f) return next(new NotFoundError('Floor not found.'));
+    const updates = { name: req.body.name, updatedAt: new Date().toISOString() };
+    const resUpdate = await db.collection(floors.tableName).updateOne(
+      { id: req.params.floor_id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) {
+      return next(new NotFoundError('Floor not found.'));
+    }
+    const f = await db.collection(floors.tableName).findOne({ id: req.params.floor_id });
     sendSuccess(res, { id: f.id, name: f.name, updated_at: f.updatedAt });
   } catch (err) { next(err); }
 });
 
 router.delete('/:floor_id', requireRole('admin'), async (req, res, next) => {
   try {
-    const [f] = await db.select().from(floors).where(eq(floors.id, req.params.floor_id)).limit(1);
+    const f = await db.collection(floors.tableName).findOne({ id: req.params.floor_id });
     if (!f) return next(new NotFoundError('Floor not found.'));
 
-    const [{ count }] = await db.select({ count: sql`count(*)` }).from(tables).where(eq(tables.floorId, req.params.floor_id));
-    if (parseInt(count, 10) > 0) {
+    const count = await db.collection(tables.tableName).countDocuments({ floorId: req.params.floor_id });
+    if (count > 0) {
       return next(new ConflictError('RESOURCE_IN_USE', 'Floor has tables assigned and cannot be deleted. Remove or reassign tables first.'));
     }
 
-    await db.delete(floors).where(eq(floors.id, req.params.floor_id));
+    await db.collection(floors.tableName).deleteOne({ id: req.params.floor_id });
     res.status(204).send();
   } catch (err) { next(err); }
 });

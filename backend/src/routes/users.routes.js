@@ -6,7 +6,6 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError } = require('../utils/errors');
 const { db } = require('../db');
 const { users } = require('../db/schema');
-const { eq } = require('drizzle-orm');
 
 const router = Router();
 
@@ -16,7 +15,7 @@ const updateProfileSchema = z.object({
 
 router.get('/me', authenticate, async (req, res, next) => {
   try {
-    const [user] = await db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
+    const user = await db.collection(users.tableName).findOne({ id: req.user.id });
     if (!user) return next(new NotFoundError('User not found.'));
     sendSuccess(res, {
       id: user.id,
@@ -33,8 +32,13 @@ router.patch('/me', authenticate, validate(updateProfileSchema), async (req, res
     const updates = { updatedAt: new Date().toISOString() };
     if (req.body.name) updates.name = req.body.name;
 
-    const [user] = await db.update(users).set(updates).where(eq(users.id, req.user.id)).returning();
-    if (!user) return next(new NotFoundError('User not found.'));
+    const resUpdate = await db.collection(users.tableName).updateOne(
+      { id: req.user.id },
+      { $set: updates }
+    );
+    if (resUpdate.matchedCount === 0) return next(new NotFoundError('User not found.'));
+
+    const user = await db.collection(users.tableName).findOne({ id: req.user.id });
 
     sendSuccess(res, {
       id: user.id,

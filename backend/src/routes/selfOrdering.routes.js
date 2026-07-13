@@ -6,7 +6,6 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError, ForbiddenError } = require('../utils/errors');
 const { db } = require('../db');
 const { selfOrderingSettings, tables, floors, products, categories, orderLines, kdsTickets, kdsTicketItems, orders, couponUsages, promotionUsages } = require('../db/schema');
-const { eq, and, like, desc, sql, lte, gte, isNull, or } = require('drizzle-orm');
 
 const router = Router();
 
@@ -33,9 +32,18 @@ const placeOrderSchema = z.object({
 
 router.get('/settings', async (_req, res, next) => {
   try {
-    let [settings] = await db.select().from(selfOrderingSettings).limit(1);
+    let settings = await db.collection(selfOrderingSettings.tableName).findOne({});
     if (!settings) {
-      [settings] = await db.insert(selfOrderingSettings).values({}).returning();
+      settings = {
+        id: 1,
+        enabled: false,
+        mode: 'online_ordering',
+        backgroundColor: '#FBF3E7',
+        backgroundImageUrl: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await db.collection(selfOrderingSettings.tableName).insertOne(settings);
     }
     sendSuccess(res, {
       enabled: settings.enabled, mode: settings.mode,
@@ -52,7 +60,11 @@ router.put('/settings', authenticate, requireRole('admin'), validate(updateSetti
     if (req.body.background_color) updates.backgroundColor = req.body.background_color;
     if (req.body.background_image_url !== undefined) updates.backgroundImageUrl = req.body.background_image_url;
 
-    const [settings] = await db.update(selfOrderingSettings).set(updates).where(eq(selfOrderingSettings.id, 1)).returning();
+    await db.collection(selfOrderingSettings.tableName).updateOne(
+      {},
+      { $set: updates }
+    );
+    const settings = await db.collection(selfOrderingSettings.tableName).findOne({});
     sendSuccess(res, {
       enabled: settings.enabled, mode: settings.mode,
       background_color: settings.backgroundColor, background_image_url: settings.backgroundImageUrl,
@@ -63,16 +75,16 @@ router.put('/settings', authenticate, requireRole('admin'), validate(updateSetti
 
 router.get('/resolve/:unique_token', async (req, res, next) => {
   try {
-    const [table] = await db.select().from(tables).where(eq(tables.qrToken, req.params.unique_token)).limit(1);
+    const table = await db.collection(tables.tableName).findOne({ qrToken: req.params.unique_token });
     if (!table) return next(new NotFoundError('INVALID_QR_TOKEN', 'This QR code is no longer valid.'));
 
     let floorData = null;
     if (table.floorId) {
-      const [f] = await db.select().from(floors).where(eq(floors.id, table.floorId)).limit(1);
+      const f = await db.collection(floors.tableName).findOne({ id: table.floorId });
       if (f) floorData = { id: f.id, name: f.name };
     }
 
-    const [settings] = await db.select().from(selfOrderingSettings).limit(1);
+    const settings = await db.collection(selfOrderingSettings.tableName).findOne({});
 
     sendSuccess(res, {
       table: { id: table.id, table_number: table.tableNumber, floor: floorData?.name || null },
@@ -88,11 +100,13 @@ router.get('/menu', async (req, res, next) => {
   try {
     const { table_id, search } = req.query;
 
-    const cats = await db.select().from(categories).orderBy(categories.name);
+    const catsCursor = await db.collection(categories.tableName).find({});
+    const cats = await catsCursor.sort({ name: 1 }).toArray();
     const result = await Promise.all(cats.map(async (cat) => {
-      const conditions = [eq(products.categoryId, cat.id)];
-      if (search) conditions.push(like(products.name, `%${search}%`));
-      const prods = await db.select().from(products).where(and(...conditions));
+      const conditions = { categoryId: cat.id };
+      if (search) conditions.name = { $regex: search, $options: 'i' };
+      const prodsCursor = await db.collection(products.tableName).find(conditions);
+      const prods = await prodsCursor.toArray();
       return {
         id: cat.id, name: cat.name, color: cat.color,
         products: prods.map((p) => ({
@@ -107,67 +121,98 @@ router.get('/menu', async (req, res, next) => {
 
 router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
   try {
-    const [settings] = await db.select().from(selfOrderingSettings).limit(1);
+    const settings = await db.collection(selfOrderingSettings.tableName).findOne({});
     if (settings && settings.mode !== 'online_ordering') {
       return next(new ForbiddenError('ORDERING_DISABLED', 'Self ordering is currently set to QR Menu mode; placing orders is not available.'));
-
-
     }
 
     const { table_id, customer, items, coupon_code } = req.body;
 
-    const [session] = await db.select().from(require('../db/schema').sessions).where(eq(require('../db/schema').sessions.status, 'open')).limit(1);
+    const session = await db.collection(require('../db/schema').sessions.tableName).findOne({ status: 'open' });
     if (!session) return next(new (require('../utils/errors').ConflictError)('INVALID_STATE', 'No active session.'));
 
     const { customers: customerModel, coupons, orders: ordersModel } = require('../db/schema');
 
     let customerId = null;
     if (customer.email) {
-      const [existing] = await db.select().from(customerModel).where(eq(customerModel.email, customer.email)).limit(1);
+      const existing = await db.collection(customerModel.tableName).findOne({ email: customer.email });
       if (existing) {
         customerId = existing.id;
       } else {
-        const [newC] = await db.insert(customerModel).values({ name: customer.name, email: customer.email, phone: customer.phone || null }).returning();
+        const newC = {
+          id: require('uuid').v4(),
+          name: customer.name,
+          email: customer.email,
+          phone: customer.phone || null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await db.collection(customerModel.tableName).insertOne(newC);
         customerId = newC.id;
       }
     } else if (customer.phone) {
-      const [existing] = await db.select().from(customerModel).where(eq(customerModel.phone, customer.phone)).limit(1);
+      const existing = await db.collection(customerModel.tableName).findOne({ phone: customer.phone });
       if (existing) {
         customerId = existing.id;
       } else {
-        const [newC] = await db.insert(customerModel).values({ name: customer.name, phone: customer.phone }).returning();
+        const newC = {
+          id: require('uuid').v4(),
+          name: customer.name,
+          phone: customer.phone,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await db.collection(customerModel.tableName).insertOne(newC);
         customerId = newC.id;
       }
     } else {
-      const [newC] = await db.insert(customerModel).values({ name: customer.name }).returning();
+      const newC = {
+        id: require('uuid').v4(),
+        name: customer.name,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await db.collection(customerModel.tableName).insertOne(newC);
       customerId = newC.id;
     }
 
     const orderNumber = `#${Date.now().toString().slice(-6)}`;
-    const [order] = await db.insert(ordersModel).values({
-      orderNumber, tableId: table_id, customerId, sessionId: session.id, status: 'draft',
-    }).returning();
+    const order = {
+      id: require('uuid').v4(),
+      orderNumber,
+      tableId: table_id,
+      customerId,
+      sessionId: session.id,
+      status: 'draft',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(ordersModel.tableName).insertOne(order);
 
     const now = new Date().toISOString();
 
     // Check which promos this customer already used on other orders
     const existingPromoUsages = new Set();
     if (customerId) {
-      const usages = await db.select().from(promotionUsages).where(eq(promotionUsages.customerId, customerId));
+      const usagesCursor = await db.collection(promotionUsages.tableName).find({ customerId });
+      const usages = await usagesCursor.toArray();
       usages.forEach((u) => existingPromoUsages.add(u.promotionId));
     }
 
-    const activePromos = await db.select().from(require('../db/schema').promotions).where(
-      and(eq(require('../db/schema').promotions.active, true),
-        or(isNull(require('../db/schema').promotions.validFrom), lte(require('../db/schema').promotions.validFrom, now)),
-        or(isNull(require('../db/schema').promotions.validUntil), gte(require('../db/schema').promotions.validUntil, now)))
-    );
+    const activePromosCursor = await db.collection(require('../db/schema').promotions.tableName).find({
+      active: true,
+      $and: [
+        { $or: [{ validFrom: null }, { validFrom: { $lte: now } }] },
+        { $or: [{ validUntil: null }, { validUntil: { $gte: now } }] }
+      ]
+    });
+    const activePromos = await activePromosCursor.toArray();
     let rawSubtotal = 0;
     let totalLineDiscount = 0;
     const appliedPromotions = new Set();
 
     for (const item of items) {
-      const [product] = await db.select().from(products).where(eq(products.id, item.product_id)).limit(1);
+      const product = await db.collection(products.tableName).findOne({ id: item.product_id });
       if (!product) continue;
 
       const unitPrice = parseFloat(product.price);
@@ -190,10 +235,17 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
       totalLineDiscount += lineDiscount;
       const lineTotal = (unitPrice * lineQty - lineDiscount).toFixed(2);
 
-      await db.insert(orderLines).values({
-        orderId: order.id, productId: item.product_id, quantity: lineQty,
-        unitPrice: product.price, lineDiscount: lineDiscount.toFixed(2),
-        appliedPromotionId, lineTotal,
+      await db.collection(orderLines.tableName).insertOne({
+        id: require('uuid').v4(),
+        orderId: order.id,
+        productId: item.product_id,
+        quantity: lineQty,
+        unitPrice: product.price,
+        lineDiscount: lineDiscount.toFixed(2),
+        appliedPromotionId,
+        lineTotal,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
 
       if (appliedPromotionId) appliedPromotions.add(appliedPromotionId);
@@ -216,19 +268,23 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
     if (coupon_code) {
       const { coupons: couponsModel } = require('../db/schema');
       const now = new Date().toISOString();
-      const [cp] = await db.select().from(couponsModel).where(
-        and(eq(couponsModel.code, coupon_code), eq(couponsModel.active, true),
-          or(isNull(couponsModel.validFrom), lte(couponsModel.validFrom, now)),
-          or(isNull(couponsModel.validUntil), gte(couponsModel.validUntil, now)))
-      ).limit(1);
+      const cp = await db.collection(couponsModel.tableName).findOne({
+        code: coupon_code,
+        active: true,
+        $and: [
+          { $or: [{ validFrom: null }, { validFrom: { $lte: now } }] },
+          { $or: [{ validUntil: null }, { validUntil: { $gte: now } }] }
+        ]
+      });
       if (cp) {
         if (cp.maxUses && cp.redemptionCount >= cp.maxUses) {
           return next(new NotFoundError('COUPON_EXHAUSTED', 'This coupon has reached its maximum usage limit.'));
         }
         if (customerId) {
-          const [existingUsage] = await db.select().from(couponUsages)
-            .where(and(eq(couponUsages.couponId, cp.id), eq(couponUsages.customerId, customerId)))
-            .limit(1);
+          const existingUsage = await db.collection(couponUsages.tableName).findOne({
+            couponId: cp.id,
+            customerId
+          });
           if (existingUsage) {
             return next(new NotFoundError('COUPON_ALREADY_USED', 'This coupon has already been used by this customer.'));
           }
@@ -240,9 +296,10 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
         }
         couponDiscount = Math.min(couponDiscount, rawSubtotal);
         couponId = cp.id;
-        await db.update(couponsModel).set({
-          redemptionCount: cp.redemptionCount + 1,
-        }).where(eq(couponsModel.id, cp.id));
+        await db.collection(couponsModel.tableName).updateOne(
+          { id: cp.id },
+          { $set: { redemptionCount: cp.redemptionCount + 1 } }
+        );
       }
     }
 
@@ -251,40 +308,72 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
     const tax = rawSubtotal * taxRate;
     const total = Math.max(0, rawSubtotal + tax - totalDiscount);
 
-    await db.update(ordersModel).set({
-      subtotal: rawSubtotal.toFixed(2), tax: tax.toFixed(2),
-      discount: totalDiscount.toFixed(2), total: total.toFixed(2),
-      couponId, updatedAt: new Date().toISOString(),
-    }).where(eq(ordersModel.id, order.id));
+    await db.collection(ordersModel.tableName).updateOne(
+      { id: order.id },
+      {
+        $set: {
+          subtotal: rawSubtotal.toFixed(2),
+          tax: tax.toFixed(2),
+          discount: totalDiscount.toFixed(2),
+          total: total.toFixed(2),
+          couponId,
+          updatedAt: new Date().toISOString(),
+        }
+      }
+    );
 
     if (couponId && customerId) {
-      await db.insert(couponUsages).values({
-        couponId, orderId: order.id, customerId,
+      await db.collection(couponUsages.tableName).insertOne({
+        id: require('uuid').v4(),
+        couponId,
+        orderId: order.id,
+        customerId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
     }
 
     if (customerId && appliedPromotions.size > 0) {
       const values = [];
       for (const promoId of appliedPromotions) {
-        values.push({ promotionId: promoId, orderId: order.id, customerId });
+        values.push({
+          id: require('uuid').v4(),
+          promotionId: promoId,
+          orderId: order.id,
+          customerId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
       }
-      if (values.length > 0) await db.insert(promotionUsages).values(values);
+      if (values.length > 0) await db.collection(promotionUsages.tableName).insertMany(values);
     }
 
-    const [kt] = await db.insert(kdsTickets).values({
-      orderId: order.id, ticketNumber: orderNumber, stage: 'to_cook',
-    }).returning();
+    const kt = {
+      id: require('uuid').v4(),
+      orderId: order.id,
+      ticketNumber: orderNumber,
+      stage: 'to_cook',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.collection(kdsTickets.tableName).insertOne(kt);
 
     for (const item of items) {
-      const [p] = await db.select().from(products).where(eq(products.id, item.product_id)).limit(1);
+      const p = await db.collection(products.tableName).findOne({ id: item.product_id });
       if (!p) continue;
-      await db.insert(kdsTicketItems).values({
-        ticketId: kt.id, productId: item.product_id,
-        productName: p.name, quantity: item.quantity, completed: false,
+      await db.collection(kdsTicketItems.tableName).insertOne({
+        id: require('uuid').v4(),
+        ticketId: kt.id,
+        productId: item.product_id,
+        productName: p.name,
+        quantity: item.quantity,
+        completed: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
     }
 
-    const [updatedOrder] = await db.select().from(ordersModel).where(eq(ordersModel.id, order.id)).limit(1);
+    const updatedOrder = await db.collection(ordersModel.tableName).findOne({ id: order.id });
 
     sendSuccess(res, {
       order_id: updatedOrder.id, order_number: updatedOrder.orderNumber, status: 'draft',
@@ -300,10 +389,10 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
 router.get('/orders/:order_id/status', async (req, res, next) => {
   try {
     const { orders: ordersModel } = require('../db/schema');
-    const [order] = await db.select().from(ordersModel).where(eq(ordersModel.id, req.params.order_id)).limit(1);
+    const order = await db.collection(ordersModel.tableName).findOne({ id: req.params.order_id });
     if (!order) return next(new NotFoundError('Order not found.'));
 
-    const [ticket] = await db.select().from(kdsTickets).where(eq(kdsTickets.orderId, order.id)).limit(1);
+    const ticket = await db.collection(kdsTickets.tableName).findOne({ orderId: order.id });
 
     sendSuccess(res, {
       order_id: order.id, order_number: order.orderNumber,
@@ -317,8 +406,9 @@ router.get('/orders/history', async (req, res, next) => {
     const { table_id } = req.query;
     const { orders: ordersModel } = require('../db/schema');
 
-    const conditions = [eq(ordersModel.tableId, table_id)];
-    const data = await db.select().from(ordersModel).where(conditions.length > 0 ? and(...conditions) : undefined).orderBy(desc(ordersModel.createdAt)).limit(20);
+    const filter = { tableId: table_id };
+    const cursor = await db.collection(ordersModel.tableName).find(filter);
+    const data = await cursor.sort({ createdAt: -1 }).limit(20).toArray();
 
     sendSuccess(res, data.map((o) => ({
       order_id: o.id, order_number: o.orderNumber, status: o.status,

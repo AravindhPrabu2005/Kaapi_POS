@@ -7,7 +7,6 @@ const { sendSuccess, sendPaginated } = require("../utils/response");
 const { NotFoundError, ConflictError } = require("../utils/errors");
 const { db } = require("../db");
 const { categories, products } = require("../db/schema");
-const { eq, and, like, sql } = require("drizzle-orm");
 
 const router = Router();
 router.use(authenticate);
@@ -33,32 +32,30 @@ router.get("/", parsePagination, async (req, res, next) => {
     const { search } = req.query;
     const { page, pageSize, offset } = req.pagination;
 
-    const conditions = [];
-    if (search) conditions.push(like(categories.name, `%${search}%`));
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
+    const filter = {};
+    if (search) {
+      filter.name = { $regex: search, $options: "i" };
+    }
 
-    const [data, [{ count }]] = await Promise.all([
-      db
-        .select()
-        .from(categories)
-        .where(where)
-        .limit(pageSize)
-        .offset(offset)
-        .orderBy(categories.createdAt),
-      db.select({ count: sql`count(*)` }).from(categories).where(where),
-    ]);
+    const count = await db.collection(categories.tableName).countDocuments(filter);
+    const data = await db
+      .collection(categories.tableName)
+      .find(filter)
+      .sort({ createdAt: 1 })
+      .skip(offset)
+      .limit(pageSize)
+      .toArray();
 
     const result = await Promise.all(
       data.map(async (cat) => {
-        const [{ count: productCount }] = await db
-          .select({ count: sql`count(*)` })
-          .from(products)
-          .where(eq(products.categoryId, cat.id));
+        const productCount = await db
+          .collection(products.tableName)
+          .countDocuments({ categoryId: cat.id, deletedAt: null });
         return {
           id: cat.id,
           name: cat.name,
           color: cat.color,
-          product_count: parseInt(productCount, 10),
+          product_count: productCount,
           created_at: cat.createdAt,
         };
       }),
@@ -67,7 +64,7 @@ router.get("/", parsePagination, async (req, res, next) => {
     sendPaginated(res, result, {
       page,
       pageSize,
-      totalCount: parseInt(count, 10),
+      totalCount: count,
     });
   } catch (err) {
     next(err);
@@ -76,22 +73,15 @@ router.get("/", parsePagination, async (req, res, next) => {
 
 router.get("/:category_id", async (req, res, next) => {
   try {
-    const [cat] = await db
-      .select()
-      .from(categories)
-      .where(eq(categories.id, req.params.category_id))
-      .limit(1);
+    const cat = await db.collection(categories.tableName).findOne({ id: req.params.category_id });
     if (!cat) return next(new NotFoundError("Category not found."));
 
-    const [{ count }] = await db
-      .select({ count: sql`count(*)` })
-      .from(products)
-      .where(eq(products.categoryId, cat.id));
+    const count = await db.collection(products.tableName).countDocuments({ categoryId: cat.id, deletedAt: null });
     sendSuccess(res, {
       id: cat.id,
       name: cat.name,
       color: cat.color,
-      product_count: parseInt(count, 10),
+      product_count: count,
       created_at: cat.createdAt,
       updated_at: cat.updatedAt,
     });
@@ -106,7 +96,14 @@ router.post(
   validate(createSchema),
   async (req, res, next) => {
     try {
-      const [cat] = await db.insert(categories).values(req.body).returning();
+      const cat = {
+        id: require("uuid").v4(),
+        name: req.body.name,
+        color: req.body.color || "#F4A261",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await db.collection(categories.tableName).insertOne(cat);
       sendSuccess(
         res,
         {
@@ -131,13 +128,15 @@ router.put(
   validate(updateSchema),
   async (req, res, next) => {
     try {
-      const updates = { ...req.body, updatedAt: new Date().toISOString() }; // "20-06-2026-05-30-10"
-      const [cat] = await db
-        .update(categories)
-        .set(updates)
-        .where(eq(categories.id, req.params.category_id))
-        .returning();
-      if (!cat) return next(new NotFoundError("Category not found."));
+      const updates = { ...req.body, updatedAt: new Date().toISOString() };
+      const resUpdate = await db.collection(categories.tableName).updateOne(
+        { id: req.params.category_id },
+        { $set: updates }
+      );
+      if (resUpdate.matchedCount === 0) {
+        return next(new NotFoundError("Category not found."));
+      }
+      const cat = await db.collection(categories.tableName).findOne({ id: req.params.category_id });
       sendSuccess(res, {
         id: cat.id,
         name: cat.name,
@@ -152,18 +151,11 @@ router.put(
 
 router.delete("/:category_id", requireRole("admin"), async (req, res, next) => {
   try {
-    const [cat] = await db
-      .select()
-      .from(categories)
-      .where(eq(categories.id, req.params.category_id))
-      .limit(1);
+    const cat = await db.collection(categories.tableName).findOne({ id: req.params.category_id });
     if (!cat) return next(new NotFoundError("Category not found."));
 
-    const [{ count }] = await db
-      .select({ count: sql`count(*)` })
-      .from(products)
-      .where(eq(products.categoryId, req.params.category_id));
-    if (parseInt(count, 10) > 0) {
+    const count = await db.collection(products.tableName).countDocuments({ categoryId: req.params.category_id, deletedAt: null });
+    if (count > 0) {
       return next(
         new ConflictError(
           "RESOURCE_IN_USE",
@@ -172,13 +164,13 @@ router.delete("/:category_id", requireRole("admin"), async (req, res, next) => {
       );
     }
 
-    await db
-      .delete(categories)
-      .where(eq(categories.id, req.params.category_id));
+    await db.collection(categories.tableName).deleteOne({ id: req.params.category_id });
     res.status(204).send();
   } catch (err) {
     next(err);
   }
 });
+
+module.exports = router;
 
 module.exports = router;
