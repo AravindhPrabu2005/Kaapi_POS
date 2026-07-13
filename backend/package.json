@@ -9,8 +9,6 @@
   "scripts": {
     "dev": "node --watch index.js",
     "start": "node index.js",
-    "db:seed": "node seed.js",
-    "db:seed-all": "node seed-all.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
