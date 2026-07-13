@@ -86,7 +86,7 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
     if (req.body.scope === 'product') {
       const parsed = createProductScopeSchema.parse(req.body);
       const promo = {
-        id: require('uuid').v4(),
+        id: require('crypto').randomUUID(),
         name: parsed.name,
         scope: 'product',
         productId: parsed.product_id,
@@ -116,7 +116,7 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
     if (req.body.scope === 'order') {
       const parsed = createOrderScopeSchema.parse(req.body);
       const promo = {
-        id: require('uuid').v4(),
+        id: require('crypto').randomUUID(),
         name: parsed.name,
         scope: 'order',
         minOrderAmount: parsed.min_order_amount,

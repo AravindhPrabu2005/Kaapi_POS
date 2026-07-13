@@ -40,7 +40,7 @@ router.post('/open', async (req, res, next) => {
     }
 
     const session = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       openedBy: req.user.id,
       status: 'open',
       openedAt: new Date().toISOString(),

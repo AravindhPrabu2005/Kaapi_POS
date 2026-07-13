@@ -91,7 +91,7 @@ router.post('/', validate(createEmployeeSchema), async (req, res, next) => {
 
     const passwordHash = await bcrypt.hash(password, config.bcryptRounds);
     const user = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       name,
       email,
       passwordHash,

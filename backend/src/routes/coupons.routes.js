@@ -82,7 +82,7 @@ router.post('/', requireRole('admin'), validate(createSchema), async (req, res, 
     }
 
     const c = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       code: req.body.code,
       discountType: req.body.discount_type,
       discountValue: req.body.discount_value,

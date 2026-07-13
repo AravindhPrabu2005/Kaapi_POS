@@ -6,7 +6,7 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError, ConflictError, ValidationError } = require('../utils/errors');
 const { db } = require('../db');
 const { orders, payments } = require('../db/schema');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID: uuidv4 } = require('crypto');
 const QRCode = require('qrcode');
 
 const router = Router();

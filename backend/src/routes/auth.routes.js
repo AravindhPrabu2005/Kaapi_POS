@@ -39,7 +39,7 @@ function generateTokens(userRecord) {
     JWT_SECRET,
     { expiresIn: '1h' }
   );
-  const refreshToken = require('uuid').v4();
+  const refreshToken = require('crypto').randomUUID();
   return { accessToken, refreshToken, expiresIn: 3600 };
 }
 
@@ -54,7 +54,7 @@ router.post('/signup', validate(signupSchema), async (req, res, next) => {
 
     const passwordHash = await bcrypt.hash(password, config.bcryptRounds);
     const user = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       name,
       email,
       passwordHash,

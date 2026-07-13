@@ -97,7 +97,7 @@ router.post(
   async (req, res, next) => {
     try {
       const cat = {
-        id: require("uuid").v4(),
+        id: require('crypto').randomUUID(),
         name: req.body.name,
         color: req.body.color || "#F4A261",
         createdAt: new Date().toISOString(),

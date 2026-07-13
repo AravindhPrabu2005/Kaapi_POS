@@ -58,7 +58,7 @@ router.get('/:floor_id', async (req, res, next) => {
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
     const f = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       name: req.body.name,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

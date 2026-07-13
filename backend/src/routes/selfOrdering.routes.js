@@ -140,7 +140,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
         customerId = existing.id;
       } else {
         const newC = {
-          id: require('uuid').v4(),
+          id: require('crypto').randomUUID(),
           name: customer.name,
           email: customer.email,
           phone: customer.phone || null,
@@ -156,7 +156,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
         customerId = existing.id;
       } else {
         const newC = {
-          id: require('uuid').v4(),
+          id: require('crypto').randomUUID(),
           name: customer.name,
           phone: customer.phone,
           createdAt: new Date().toISOString(),
@@ -167,7 +167,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
       }
     } else {
       const newC = {
-        id: require('uuid').v4(),
+        id: require('crypto').randomUUID(),
         name: customer.name,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -178,7 +178,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
 
     const orderNumber = `#${Date.now().toString().slice(-6)}`;
     const order = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       orderNumber,
       tableId: table_id,
       customerId,
@@ -236,7 +236,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
       const lineTotal = (unitPrice * lineQty - lineDiscount).toFixed(2);
 
       await db.collection(orderLines.tableName).insertOne({
-        id: require('uuid').v4(),
+        id: require('crypto').randomUUID(),
         orderId: order.id,
         productId: item.product_id,
         quantity: lineQty,
@@ -324,7 +324,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
 
     if (couponId && customerId) {
       await db.collection(couponUsages.tableName).insertOne({
-        id: require('uuid').v4(),
+        id: require('crypto').randomUUID(),
         couponId,
         orderId: order.id,
         customerId,
@@ -337,7 +337,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
       const values = [];
       for (const promoId of appliedPromotions) {
         values.push({
-          id: require('uuid').v4(),
+          id: require('crypto').randomUUID(),
           promotionId: promoId,
           orderId: order.id,
           customerId,
@@ -349,7 +349,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
     }
 
     const kt = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       orderId: order.id,
       ticketNumber: orderNumber,
       stage: 'to_cook',
@@ -362,7 +362,7 @@ router.post('/orders', validate(placeOrderSchema), async (req, res, next) => {
       const p = await db.collection(products.tableName).findOne({ id: item.product_id });
       if (!p) continue;
       await db.collection(kdsTicketItems.tableName).insertOne({
-        id: require('uuid').v4(),
+        id: require('crypto').randomUUID(),
         ticketId: kt.id,
         productId: item.product_id,
         productName: p.name,

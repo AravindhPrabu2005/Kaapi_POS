@@ -93,9 +93,9 @@ router.get('/:table_id', async (req, res, next) => {
 
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
-    const qrToken = `tbl_${require('uuid').v4().slice(0, 8)}`;
+    const qrToken = `tbl_${require('crypto').randomUUID().slice(0, 8)}`;
     const t = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       floorId: req.body.floor_id,
       tableNumber: req.body.table_number,
       seats: req.body.seats || 2,

@@ -78,7 +78,7 @@ router.get('/:product_id', async (req, res, next) => {
 router.post('/', requireRole('admin'), validate(createSchema), async (req, res, next) => {
   try {
     const p = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       name: req.body.name,
       categoryId: req.body.category_id,
       price: req.body.price,

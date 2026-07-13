@@ -64,7 +64,7 @@ router.get('/:customer_id', async (req, res, next) => {
 router.post('/', validate(createSchema), async (req, res, next) => {
   try {
     const c = {
-      id: require('uuid').v4(),
+      id: require('crypto').randomUUID(),
       name: req.body.name,
       email: req.body.email || null,
       phone: req.body.phone || null,

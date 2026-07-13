@@ -6,7 +6,7 @@ const { sendSuccess } = require('../utils/response');
 const { NotFoundError } = require('../utils/errors');
 const { db } = require('../db');
 const { orders, orderLines, products, promotions, promotionUsages } = require('../db/schema');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID: uuidv4 } = require('crypto');
 
 const router = Router();
 router.use(authenticate);

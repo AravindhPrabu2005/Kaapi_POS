@@ -7,7 +7,7 @@ const { sendSuccess, sendPaginated } = require('../utils/response');
 const { NotFoundError, ConflictError } = require('../utils/errors');
 const { db } = require('../db');
 const { orders, tables, customers, users, sessions, orderLines, products, categories, kdsTickets, kdsTicketItems, coupons, couponUsages, promotions, promotionUsages, payments } = require('../db/schema');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID: uuidv4 } = require('crypto');
 
 const router = Router();
 router.use(authenticate);
