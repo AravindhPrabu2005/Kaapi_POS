@@ -37,10 +37,10 @@ export default function App() {
     <BrowserRouter>
       <AuthProvider>
         <Routes>
-          <Route path="/landing" element={<Landing />} />
+          <Route path="/" element={<Landing />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
-          <Route path="/" element={<ProtectedRoute><HomeRedirect /></ProtectedRoute>} />
+          <Route path="/home" element={<ProtectedRoute><HomeRedirect /></ProtectedRoute>} />
           <Route path="/pos" element={<ProtectedRoute><PosDashboard /></ProtectedRoute>} />
           <Route path="/kitchen" element={<KitchenDisplay />} />
           <Route path="/s/:qrToken" element={<SelfOrderCustomer />} />
