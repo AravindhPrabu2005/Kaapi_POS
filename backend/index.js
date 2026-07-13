@@ -15,7 +15,8 @@ app.get('/', (_req, res) => {
   res.json({ status: 'ok', message: 'Kaapi POS API is running' });
 });
 
-app.get('/health', async (_req, res) => {
+// System health status and DB connectivity check endpoint
+app.get('/health', async (req, res, next) => {
   try {
     await pool.query('SELECT 1');
     res.json({ status: 'ok', db: 'connected' });
