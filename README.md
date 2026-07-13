@@ -1,6 +1,6 @@
 # Kaapi POS
 
-A cloud-based Point of Sale system for cafes and restaurants, built as part of the Odoo x KAHE internship.
+A cloud-based Point of Sale system for cafes and restaurants.
 
 ## Architecture
 
